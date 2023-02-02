@@ -1,0 +1,745 @@
+---
+title: "Plot_simulation"
+author: "Eleanor Zhang"
+date: "10/10/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(scales) # display colors
+#library(gplots) # heatmap.2
+#library(RColorBrewer)
+# packageurl <- "https://cran.r-project.org/src/contrib/Archive/reticulate/reticulate_1.14.tar.gz"
+# install.packages(packageurl, repos=NULL, type="source")
+# library(reticulate)
+
+library(cowplot)
+library(PNWColors) # for color-blind pallete
+# use_condaenv("csci567") # use a env that don't use MLK 
+# #use_condaenv("python")
+# np <- import("numpy")
+# scipy <- import("scipy.spatial")
+#scipy.linalg <- import("scipy.linalg")
+
+mytheme <- theme_bw()+ 
+  theme(plot.title = element_text(size=6, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        axis.text.x = element_text(size=6, face="bold", angle = 45),
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6),
+        legend.position="bottom")
+
+axis_theme <- theme(axis.title.y = element_text(size=10, face="bold"),
+          # axis.title.x = element_text(size=8, face="bold"),
+          axis.text.x = element_text(size=8, angle = 45),
+          # axis.text.x = element_text(size=8),
+          axis.text.y = element_text(size=8))
+
+A_name <- "genetic effect error"
+B_name <- "trait factor score error"
+C_name <- "variant loading error"
+
+full_width <- 17.4 # cm
+onecol_width <- 8.5 # cm
+full_height <- 7.6 # cm
+onecol_height <- 6.5 # cm
+
+source("./myfunction.R")
+project <- getwd()
+plots_dir <- paste0(project, "/results/plots/paper/sim/")
+```
+
+## Basics set-up
+
+### UKBB sample size distribution (old Neale's lab sample size)
+```{r}
+## replace with PanUKBB sample size
+# ukbb <- read_tsv("./data/ukb31063_h2_topline.02Oct2019.tsv.gz")
+# dim(ukbb)
+# df_g <- ukbb %>% filter(!isBadPower) %>% 
+#         select(Neff) %>% 
+#         mutate(Neff.I = as.integer(Neff)) %>% 
+#         group_by(Neff.I) %>% 
+#         mutate(Neff.x = n()) %>% 
+#         ungroup() %>% 
+#         mutate(Neff.P = Neff.x / n()) %>% select(Neff = Neff.I, Neff.P) #%>% distinct()
+# df_g %>% ggplot(aes(x = Neff)) + geom_histogram() + mytheme + 
+#         ggtitle("Distribution of GWAS sample in UKBB")
+# dim(df_g)
+# ggsave(filename = paste0("results/plots/paper/sim/", "ukbb_Neff", ".png"), width =10, height = 8, dpi = 300, units = "cm")
+```
+
+
+## Simulation result (k is known)
+
+### Only include centered results for tSVD on Z score and FactorGO
+
+```{r}
+folder <- "check_ss_rotW" # n100_p2k_new_gendata, check_ss, check_ss_rotW
+plan_folder <- "planA" #planB, poissonN, varyhyper
+which_param <- "n"
+plot_opt <- "mainfig" # mainfig, onlyscale, all
+
+metric_list <- c("Bfit", "Zfn", "Wfn")
+
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+for (idx in 1:3) {
+  read_dat <- read_tsv(paste0(project,"/results/sim/", folder, "/allres/", plan_folder, "_", metric_list[idx], "_res.tsv"), col_names=T)
+  assign(dat_name[idx], read_dat) 
+}
+
+anyNA(Bfit_res); anyNA(Zfn_res); anyNA(Wfn_res)
+
+p1 <- plot_sim(Bfit_res, which_param, plot_opt)
+p2 <- plot_sim(Zfn_res, which_param, plot_opt)
+p3 <- plot_sim(Wfn_res, which_param, plot_opt)
+
+# arrange the three plots in a single row
+# ylab(bquote("\u2016"*Z - RZ*"\u2016"[F]))
+prow_1 <- plot_grid(
+  p1 + theme(legend.position="none")+
+    ylab(bquote("\u2016"*B - LF*"\u2016"[F]))#+xlab(bquote(h^2))
+  +axis_theme,
+  p2 + theme(legend.position="none")+
+    ylab(bquote("\u2016"*F - RF*"\u2016"[F]))#+xlab(bquote(h^2))
+  +axis_theme,
+  p3 + theme(legend.position="none")+
+    ylab(bquote("\u2016"*L - LR*"\u2016"[F]))#+xlab(bquote(h^2))
+    +axis_theme,
+  align = 'vh',
+  hjust = -1, 
+  nrow = 1,
+  label_size=10
+)
+
+# extract a legend that is laid out horizontally
+legend_b <- get_legend(
+  p1 + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.direction = "horizontal",legend.justification="center" ,legend.box.just = "bottom")
+)
+
+plot_grid(prow_1, prow_2, prow_3,prow_4,legend_b,
+          labels = c("A", "B", "C", "D", ""),
+          label_size = 10,
+          hjust = -0.5,
+          align = 'v',
+          ncol = 1, rel_heights = c(1, 1, 1, 1, .1))
+
+ggsave2(filename = paste0(plots_dir, "FigS1_model_grid.png"), 
+       width = full_width, height = full_height*2.5, dpi = 300, units = "cm")
+```
+
+hypothesis test
+```{r}
+# for h2
+aov(VBc ~ h2, data=Zfn_res %>% filter(h2 < 0.1)) %>% broom::tidy() %>% pull(p.value)
+
+# F ~ # GWAS study: 2.09E-24
+lm(VBc ~ n, data=Zfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ n, data=Zfn_res) %>% broom::tidy()
+
+# W ~ # GWAS study: 5.22E-15
+lm(VBc ~ n, data=Wfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ n, data=Wfn_res) %>% broom::tidy()
+
+# F ~ # p variants: 0.99
+lm(VBc ~ p, data=Zfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ p, data=Zfn_res) %>% broom::tidy()
+
+# W ~ # p variants
+lm(VBc ~ p, data=Wfn_res) %>% broom::tidy() # 8.40E-6
+lm(svd_Zscore_c ~ p, data=Wfn_res) %>% broom::tidy()
+
+# F ~ # k: 7.30e-26
+lm(VBc ~ k, data=Zfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ k, data=Zfn_res) %>% broom::tidy()
+
+# W ~ # k: 1.40e-23
+lm(VBc ~ k, data=Wfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ k, data=Wfn_res) %>% broom::tidy()
+
+# F ~ h2 : 7.30e-26
+lm(VBc ~ h2, data=Zfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ k, data=Zfn_res) %>% broom::tidy()
+
+# W ~ h2: 1.40e-23
+lm(VBc ~ h2, data=Wfn_res) %>% broom::tidy()
+lm(svd_Zscore_c ~ h2, data=Wfn_res) %>% broom::tidy()
+
+lm(VBc ~ h2, data=Zfn_res %>% filter(h2 >= 0.05)) %>% broom::tidy() # 0.36
+lm(VBc ~ h2, data=Wfn_res %>% filter(h2 >= 0.05)) %>% broom::tidy() # 0.071
+```
+
+
+###  FactorGO vary hyperparameters
+
+```{r}
+folder <- "check_ss_rotW" # n100_p2k_new_gendata
+plan_folder <- "varyhyper" #planB, poissonN, varyhyper
+plot_opt <- "mainfig" # mainfig, onlyscale, all
+
+metric_list <- c("Bfit", "Zfn", "Wfn")
+
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+for (idx in 1:3) {
+  read_dat <- read_tsv(paste0(project,"/results/sim/", folder, "/allres/", plan_folder, "_", metric_list[idx], "_res.tsv"), col_names=T)
+  assign(dat_name[idx], read_dat) 
+}
+
+Bfit_res <- Bfit_res %>% 
+  mutate(default.hyper = as.factor(ifelse(htau_a == 1e-5 & htau_b == 1e-5 & halpha_a == 1e-5 & halpha_b == 1e-5 & hbeta == 1e-5, "default", "alternative")),
+         default.hyper = relevel(default.hyper, "default")) 
+Zfn_res <- Zfn_res %>% 
+  mutate(default.hyper = as.factor(ifelse(htau_a == 1e-5 & htau_b == 1e-5 & halpha_a == 1e-5 & halpha_b == 1e-5 & hbeta == 1e-5, "default", "alternative")),
+         default.hyper = relevel(default.hyper, "default")) 
+Wfn_res <- Wfn_res %>% 
+  mutate(default.hyper = as.factor(ifelse(htau_a == 1e-5 & htau_b == 1e-5 & halpha_a == 1e-5 & halpha_b == 1e-5 & hbeta == 1e-5, "default", "alternative")),
+         default.hyper = relevel(default.hyper, "default")) 
+
+
+p1 <- Bfit_res %>% 
+  ggplot(aes(x = default.hyper, y = VBc)) +
+  geom_boxplot(outlier.size = 0.5) +
+  theme_half_open(12) + 
+  xlab(NULL)+
+  ylab(bquote("\u2016"*B - LF*"\u2016"[F]))+theme(axis.title.y = element_text(size = 8))
+
+p2 <- Zfn_res %>% 
+  ggplot(aes(x = default.hyper, y = VBc)) +
+  geom_boxplot(outlier.size = 0.5) +
+  theme_half_open(12) + 
+  xlab(NULL) +
+  ylab(bquote("\u2016"*F - RF*"\u2016"[F]))+theme(axis.title.y = element_text(size = 8))
+
+p3 <- Wfn_res %>% 
+  ggplot(aes(x = default.hyper, y = VBc)) +
+  geom_boxplot(outlier.size = 0.5) +
+  theme_half_open(12) + 
+  xlab(NULL) +
+  ylab(bquote("\u2016"*L - LR*"\u2016"[F]))+theme(axis.title.y = element_text(size = 8))
+
+plot_grid(p1,p2,p3,
+          label = "AUTO",
+          align = 'h',
+          hjust = -1,
+          nrow = 1, ncol = 3)
+
+ggsave2(filename = paste0(plots_dir, "FigS1_model_hyperparam_grid.png"), 
+        width = full_width, height = full_height, dpi = 300, units = "cm")
+
+
+hist(Bfit_res %>% filter(default.hyper != "default") %>% pull(VBc))
+
+wilcox.test(VB ~ default.hyper, data = Bfit_res) %>% broom::tidy() # 0.96
+wilcox.test(VB ~ default.hyper, data = Zfn_res) %>% broom::tidy() # 0.93
+wilcox.test(VB ~ default.hyper, data = Wfn_res) %>% broom::tidy() # 0.90
+```
+
+
+### plot everything together: Fig 2
+
+```{r}
+folder <- "check_ss_rotW" # check_ss (rotZ), n100_p2k_new_gendata, check_ss_rotW
+metric <- c("Bfit", "Zfn", "Wfn")
+# metric <- c("Bfit", "Zstdfn", "Wstdfn")
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+qtrue_Bfit <- read_tsv(paste0("./results/sim/", folder, "/allres/allplan_truek_", metric[1], "_res.tsv"), col_names=T);anyNA(qtrue_Bfit)
+qtrue_Zfn <- read_tsv(paste0("./results/sim/", folder, "/allres/allplan_truek_", metric[2], "_res.tsv"), col_names=T);anyNA(qtrue_Bfit)
+qtrue_Wfn <- read_tsv(paste0("./results/sim/", folder, "/allres/allplan_truek_", metric[3], "_res.tsv"), col_names=T);anyNA(qtrue_Bfit)
+
+p1 <- plot_sim_simple(qtrue_Bfit)
+p2 <- plot_sim_simple(qtrue_Zfn)
+p3 <- plot_sim_simple(qtrue_Wfn)
+
+axis_theme2 <- theme(axis.title.y = element_text(size=10, face="bold"),
+          axis.title.x = element_text(size=8, face="bold"),
+          # axis.text.x = element_text(size=8, angle = 45),
+          axis.text.x = element_text(size=8, face="bold"),
+          axis.text.y = element_text(size=8, face="bold"))
+
+prow <- plot_grid(
+  p1 + theme(legend.position="none") #+ylab(bquote("\u2016"*B - LF*"\u2016"[F])) +
+    +ylab(A_name)+axis_theme2,
+  p2 + theme(legend.position="none") #+ylab(bquote("\u2016"*F - RF*"\u2016"[F])) +
+    + ylab(B_name)+axis_theme2,
+  p3 + theme(legend.position="none") #+ylab(bquote("\u2016"*L - LR*"\u2016"[F])) +
+    +ylab(C_name)+axis_theme2,
+  align = 'h',
+  labels = "AUTO",
+  hjust = -0.5, # -1
+  nrow = 1,
+  label_size=8
+)
+
+legend_b <- get_legend(
+  p1 + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.direction = "horizontal",legend.justification="center" ,legend.box.just = "bottom")
+)
+
+plot_grid(prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+
+ggsave2(filename = paste0(plots_dir, "Fig1_all_True.rotW.png"), 
+       width = full_width, height = full_height, dpi = 300, units = "cm")
+```
+
+test for difference
+```{r}
+hist(qtrue_Zfn$VBc); qqnorm(qtrue_Zfn$VBc)
+hist(qtrue_Wfn$svd_Zscore_c)
+summary(qtrue_Zfn$VBc); summary(qtrue_Zfn$svd_Zscore_c)
+summary(qtrue_Wfn$VBc); summary(qtrue_Wfn$svd_Zscore_c)
+
+# F: 3.64305e-109
+wilcox.test(qtrue_Zfn$VBc, qtrue_Zfn$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% pull(p.value)
+# L: 0.2939572
+wilcox.test(qtrue_Wfn$VBc, qtrue_Wfn$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% pull(p.value)
+# Bfit: 0.10
+wilcox.test(qtrue_Bfit$VBc, qtrue_Bfit$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% pull(p.value)
+```
+
+## Simulation k unknown: vary k
+
+```{r}
+folder <- "check_ss_rotW" # n100_p2k_new_gendata, check_ss
+metric <- c("Bfit", "Zfn", "Zstdfn", "Wfn") # check Zstdfn
+plan <- "varyk_allk" # varyk_truek, varyk_allk
+dat_name <- c("Bfit_res", "Zfn_res", "Zfn_res_std", "Wfn_res")
+plot_opt <- "mainfig"
+
+for (idx in 1:4) {
+    read_dat <- read_tsv(paste0("./results/sim/", folder, "/allres/", plan, "_", metric[[idx]], "_res.tsv"), col_names=T) %>% 
+    mutate(k = as.factor(q))
+  assign(dat_name[idx], read_dat) 
+}
+
+dim(Bfit_res); anyNA(Bfit_res) # 4x30
+dim(Zfn_res); anyNA(Zfn_res) 
+dim(Zfn_res_std); anyNA(Zfn_res_std) 
+dim(Wfn_res); anyNA(Wfn_res) 
+
+
+p1 <- plot_sim(Bfit_res, "k", plot_opt)
+p2 <- plot_sim(Zfn_res, "k", plot_opt)
+cols <- c("FactorGo" = "#D55E00",
+          "tSVD" = "#56B4E9")
+
+# p2 <- Zfn_res %>% mutate(VBc_std = Zfn_res_std$VBc) %>% 
+#   rename(tSVD = svd_Zscore_c) %>% 
+#   gather(key = VB_method, value = FactorGo, c(VBc, VBc_std)) %>% 
+#   mutate(VB_std = ifelse(VB_method == "VBc_std", "standardized", "raw")) %>% 
+#   gather(key = method, value = fnorm, c(tSVD, FactorGo)) %>% 
+#   ggplot(aes(x = k, y = fnorm, fill = method)) +
+#   geom_boxplot(outlier.size = 0.1, lwd=0.2) +
+#   facet_wrap(~VB_std, labeller = labeller(method = supp.labs))+
+#   scale_fill_manual(values = cols) +
+#   mytheme+
+#   theme_half_open(12) +
+#   theme(plot.margin = margin(6, 0, 6, 0),
+#         legend.position = "bottom") +
+#   ylab(NULL)+
+#   xlab("k")
+
+p3 <- plot_sim(Wfn_res, "k", plot_opt)
+
+# arrange the three plots in a single row
+p_varyk <- plot_grid(
+  p1 +ylab(A_name)+axis_theme+ theme(legend.position="none"),
+  p2 +ylab(B_name)+axis_theme+ theme(legend.position="none"),
+  p3 +ylab(C_name)+axis_theme+ theme(legend.position="none"),
+  align = 'h',
+  labels = "AUTO",
+  hjust = -0.5, # -1
+  nrow = 1,
+  #rel_widths = c(0.8,1,0.8),
+  label_size=8
+)
+
+# extract a legend that is laid out horizontally
+legend_b <- get_legend(
+  p1 + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.direction = "horizontal",legend.justification="center" ,legend.box.just = "bottom")
+)
+
+plot_grid(p_varyk, legend_b, ncol = 1, rel_heights = c(1, .1))
+
+ggsave2(filename = paste0(plots_dir, "/", plan, 
+".rotW.png"), width = full_width, height = full_height, dpi = 300, units = "cm")
+
+hist(Zfn_res$svd_Zscore_c);hist(Zfn_res$VBc) 
+
+summary(Wfn_res)
+wilcox.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c, alternative="t")
+
+# raw
+wilcox.test(Zfn_res %>% filter(q < 10) %>% pull(VBc), 
+            Zfn_res %>% filter(q < 10) %>% pull(svd_Zscore_c),
+            alternative="t") %>% broom::tidy() # 0.027
+
+wilcox.test(Zfn_res %>% filter(q > 10) %>% pull(VBc), 
+            Zfn_res %>% filter(q > 10) %>% pull(svd_Zscore_c),
+            alternative="t") %>% broom::tidy()
+wilcox.test(Wfn_res %>% filter(q > 10) %>% pull(VBc), 
+            Wfn_res %>% filter(q > 10) %>% pull(svd_Zscore_c),
+            alternative="t") %>% broom::tidy() # 0.25
+wilcox.test(Bfit_res %>% filter(q > 10) %>% pull(VBc), 
+            Bfit_res %>% filter(q > 10) %>% pull(svd_Zscore_c),
+            alternative="t") %>% broom::tidy() # 2.48e-17
+
+# after adjust posterior variance
+wilcox.test(Zfn_res_std %>% filter(q > 10) %>% pull(VBc), 
+            Zfn_res_std %>% filter(q > 10) %>% pull(svd_Zscore_c),
+            alternative="t") %>% broom::tidy() # 0.32
+
+aov(VBc ~ q, data = Wfn_res %>% filter(q >= 10)) %>% broom::tidy()
+wilcox.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c)
+wilcox.test(Zfn_res_std$VBc, Zfn_res_std$svd_Zscore_c)
+wilcox.test(Bfit_res$VBc, Bfit_res$svd_Zscore_c)
+```
+
+### check user set k=20
+```{r}
+library(reticulate)
+
+use_condaenv("csci567") #numpyro
+np <- import("numpy")
+
+folder <- "check_ss_rotW" 
+rep <- 1
+dat <- np$load(paste0(project,"/results/sim/", folder, "/varyk_allk/p2000.n100.k10.q20.h20.1.VB.tsvd.", rep, ".npz")); dat$files
+
+dat['VBc_Ealpha']
+svd_Wrot <- dat['svd_ZscoreC_Wrot']; dim(svd_Wrot)
+svd_W <-  t(dat['ZscoreC_Vh']) %*% diag(dat['ZscoreC_D'])
+vb_Wrot <- dat['VBc_Wrot']; dim(vb_Wrot)
+vb_W <- dat['VBc_W']
+trueW <- cbind(dat['trueW'], matrix(rep(0, 2000*10), nrow = 2000, ncol = 10)); dim(trueW)
+
+svd_Zrot <- dat['svd_ZscoreC_Zrot']; dim(svd_Zrot)
+svd_U <- dat['ZscoreC_U'] %*% diag(dat['ZscoreC_D']); dim(svd_U)
+vb_Zrot <- dat['VBc_Zrot']; dim(vb_Zrot)
+vb_Z <- dat['VBc_Z']
+trueZ <- cbind(dat['trueZ'], matrix(rep(0, 100*10), nrow = 100, ncol = 10)); dim(trueZ)
+
+plot(trueW[,2], vb_Wrot[,2])
+plot(trueW[,2], svd_Wrot[,2])
+heatmap(svd_Wrot)
+heatmap(vb_Wrot)
+heatmap(trueW)
+
+heatmap(svd_U)
+heatmap(vb_Z)
+heatmap(trueZ)
+
+
+summary(as.vector(vb_Wrot[,11:20]))
+summary(as.vector(svd_Wrot[,11:20]))
+
+sd(abs(as.vector(svd_Wrot[,11:20])))
+sd(abs(as.vector(vb_Wrot[,11:20])))
+
+diag(cor(vb_Wrot, vb_W))
+```
+
+
+
+
+## Simulation with correlated errors
+
+### with latent structure 
+```{r}
+## vary r2
+folder <- "check_ss_rotW"
+metric <- c("Bfit", "Zfn", "Wfn")
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+for (idx in 1:3) {
+    read_dat <- read_tsv(paste0("./results/sim/", folder, "/allres/lat_", metric[[idx]], "_res.tsv"), col_names=T) %>% 
+    mutate(rhoe2 = as.factor(rho2e))
+  assign(dat_name[idx], read_dat) 
+}
+
+dim(Bfit_res); anyNA(Bfit_res) # 4x30
+dim(Zfn_res); anyNA(Zfn_res) 
+dim(Wfn_res); anyNA(Wfn_res) 
+
+# prop_in_ld, ld_r2
+p1 <- plot_sim(Bfit_res, "rhoe2", plot_opt)+xlab(bquote(rho[e]^2))
+p2 <- plot_sim(Zfn_res, "rhoe2", plot_opt)+xlab(bquote(rho[e]^2))
+p3 <- plot_sim(Wfn_res, "rhoe2", plot_opt)+xlab(bquote(rho[e]^2))
+
+# arrange the three plots in a single row
+p_rhoe_lat <- plot_grid(
+  p1 + theme(legend.position="none")+ ylab(bquote("\u2016"*B - LF*"\u2016"[F])) +
+    axis_theme,
+  p2 + theme(legend.position="none")+ylab(bquote("\u2016"*F - RF*"\u2016"[F])) +
+    axis_theme,
+  p3 + theme(legend.position="none")+ylab(bquote("\u2016"*L - LR*"\u2016"[F])) +
+    axis_theme,
+  align = 'vh',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  label_size=10
+)
+
+ggsave(p_rhoe_lat, filename = paste0(plots_dir, "Supp_sim_rhoe.png"), width =22, height = 8, dpi = 300, units = "cm")
+
+hist(Wfn_res$svd_Zscore_c)
+# robust to rhoe2
+aov(VBc ~ rhoe2, data = Zfn_res) %>% broom::tidy() # 0.998
+aov(VBc ~ rhoe2, data = Wfn_res) %>% broom::tidy() # 0.901
+
+wilcox.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% View
+
+# t.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c)
+cor_error_Zfn_res <- Zfn_res
+cor_error_Wfn_res <- Wfn_res
+```
+
+### no latent structure 
+
+```{r}
+eigen_Ealpha <- read_tsv(paste0("./results/sim/", folder, "/allres/nolat_eigen_Ealpha_res.tsv"), col_names = T) %>%   
+  mutate(svd_Bhat = svd_Bhat^2,
+         svd_Bhat_c = svd_Bhat_c^2,
+         svd_Zscore = svd_Zscore^2,
+         svd_Zscore_c = svd_Zscore_c^2)
+colnames(eigen_Ealpha)[8:13] <- c("tsvd_Bhat", "tsvd_Bhat_cs","tsvd_Zscore","tSVD","FactorGo_vanilla", "FactorGo")
+
+
+cols <- c("FactorGo" = "#D55E00",
+          "tSVD" = "#56B4E9")
+
+supp.labs <- c("FactorGo 1/E(alpha)", "tSVD Eigenvalue")
+names(supp.labs) <- c("FactorGo", "tSVD")
+
+p_eigen_Ealpha <- eigen_Ealpha %>% 
+  rename(rhoe2 = rho2e) %>% 
+  select(Replicate:rhoe2, tSVD, FactorGo) %>% 
+  gather(key = method, value = SV_invEalpha, c(tSVD:FactorGo)) %>% 
+  filter(method %in% c("tSVD", "FactorGo")) %>% 
+  mutate(rhoe2 = as.factor(rhoe2)) %>% 
+  ggplot(aes(x = rhoe2, y = SV_invEalpha, fill=method)) + 
+  geom_boxplot(outlier.size = 0.6) +
+  facet_wrap(.~ method, scales = "free_y",
+             labeller = labeller(method = supp.labs)) +
+  scale_fill_manual(values = cols) +
+  xlab(bquote(rho[e]^2))+
+  mytheme
+
+ggsave(p_eigen_Ealpha, filename = paste0(plots_dir, "/Supp_sim_rhoe_nolat", ".png"), width =22, height = 8, dpi = 300, units = "cm")
+
+eigen_Ealpha
+
+# Levene's test with one independent variable
+car::leveneTest(FactorGo ~ as.factor(rho2e), data = eigen_Ealpha) %>% broom::tidy() # 1.00
+car::leveneTest(tSVD ~ as.factor(rho2e), data = eigen_Ealpha) %>% broom::tidy() # 0.999
+```
+
+
+## Simulation LD contaminated
+
+```{r}
+# vary_LDprop
+# folder <- "n100_p2k_new_gendata"
+metric <- c("Bfit", "Zfn", "Wfn")
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+for (idx in 1:3) {
+    read_dat <- read_tsv(paste0("./results/sim/", folder, "/allres/varyLDprop_", metric[[idx]], "_res.tsv"), col_names=T) %>% 
+      filter(!is.na(VBc)) %>% 
+    mutate(prop_in_ld = as.factor(prop_in_ld))
+  assign(dat_name[idx], read_dat) 
+}
+
+dim(Bfit_res); anyNA(Bfit_res) # 4x30
+dim(Zfn_res); anyNA(Zfn_res) 
+dim(Wfn_res); anyNA(Wfn_res) 
+
+p1 <- plot_sim(Bfit_res, "prop_in_ld", plot_opt)+xlab("proportion in LD")
+p2 <- plot_sim(Zfn_res, "prop_in_ld", plot_opt)+xlab("proportion in LD") 
+p3 <- plot_sim(Wfn_res, "prop_in_ld", plot_opt)+xlab("proportion in LD") 
+
+# arrange the three plots in a single row
+p_varyLDprop <- plot_grid(
+  p1 + theme(legend.position="none")+ ylab(bquote("\u2016"*B - LF*"\u2016"[F])) +
+    axis_theme,
+  p2 + theme(legend.position="none")+ylab(bquote("\u2016"*F - RF*"\u2016"[F])) +
+    axis_theme,
+  p3 + theme(legend.position="none")+ylab(bquote("\u2016"*L - LR*"\u2016"[F])) +
+    axis_theme,
+  align = 'vh',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  label_size=10
+)
+
+ggsave(p_varyLDprop, filename = paste0(plots_dir, "/Supp_sim_varyLDprop", ".png"), width =22, height = 8, dpi = 300, units = "cm")
+
+wilcox.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% View
+
+# t.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c)
+ldprop_Zfn_res <- Zfn_res
+ldprop_Wfn_res <- Wfn_res
+```
+
+vary r2
+```{r}
+# folder <- "n100_p2k_new_gendata"
+metric <- c("Bfit", "Zfn", "Wfn")
+dat_name <- c("Bfit_res", "Zfn_res", "Wfn_res")
+
+for (idx in 1:3) {
+    read_dat <- read_tsv(paste0("./results/sim/", folder, "/allres/vary_r2_ld30_", metric[[idx]], "_res.tsv"), col_names=T) %>% 
+      filter(!is.na(VBc)) %>% 
+    mutate(ld_r2 = as.factor(ld_r2))
+  assign(dat_name[idx], read_dat) 
+}
+
+dim(Bfit_res); anyNA(Bfit_res) # 4x30
+dim(Zfn_res); anyNA(Zfn_res) 
+dim(Wfn_res); anyNA(Wfn_res) 
+
+p1 <- plot_sim(Bfit_res, "ld_r2", plot_opt)+xlab(bquote(r[LD]^2))
+p2 <- plot_sim(Zfn_res, "ld_r2", plot_opt)+xlab(bquote(r[LD]^2)) 
+p3 <- plot_sim(Wfn_res, "ld_r2", plot_opt)+xlab(bquote(r[LD]^2)) 
+
+# arrange the three plots in a single row
+p_varyr2 <- plot_grid(
+  p1 + theme(legend.position="none")+ ylab(bquote("\u2016"*B - LF*"\u2016"[F])) +
+    axis_theme,
+  p2 + theme(legend.position="none")+ylab(bquote("\u2016"*F - RF*"\u2016"[F])) +
+    axis_theme,
+  p3 + theme(legend.position="none")+ylab(bquote("\u2016"*L - LR*"\u2016"[F])) +
+    axis_theme,
+  align = 'vh',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  label_size=10
+)
+
+ggsave(p_varyr2, filename = paste0(plots_dir, "/Supp_sim_ld30_varyr2", ".png"), width =22, height = 8, dpi = 300, units = "cm")
+
+hist(Zfn_res$svd_Zscore_c)
+wilcox.test(Wfn_res$VBc, Wfn_res$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% View
+
+# t.test(Zfn_res$VBc, Zfn_res$svd_Zscore_c, alternative = "t") %>% broom::tidy() %>% View
+ldr2_Zfn_res <- Zfn_res
+ldr2_Wfn_res <- Wfn_res
+```
+
+## Plot everything together
+
+```{r}
+legend_b <- get_legend(
+  p_eigen_Ealpha + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.direction = "horizontal",legend.justification="center" ,legend.box.just = "bottom")
+)
+plot_grid(
+  p_rhoe_lat,
+  p_varyLDprop,
+  p_varyr2,
+  p_eigen_Ealpha+theme(legend.position = "none"),
+  legend_b,
+  align = 'v',
+  labels = c("A", "B", "C", "D", ""),
+  hjust = -1, 
+  ncol=1,
+  label_size=8,
+  rel_heights = c(1,1,1, 0.8,0.1)
+)
+
+ggsave2(filename = paste0(plots_dir, "/Supp_model_misspecify.png"), 
+        width = full_width, height = 20, dpi = 300, units = "cm")
+```
+
+test on pooled correlated error, ld proportion, and ld r2
+```{r}
+# 2.30e-78
+wilcox.test(c(cor_error_Zfn_res$VBc, ldprop_Zfn_res$VBc, ldr2_Zfn_res$VBc),
+            c(cor_error_Zfn_res$svd_Zscore_c, ldprop_Zfn_res$svd_Zscore_c, ldr2_Zfn_res$svd_Zscore_c),
+            alternative = "t") %>% 
+  broom::tidy()
+
+wilcox.test(c(cor_error_Wfn_res$VBc, ldprop_Wfn_res$VBc, ldr2_Wfn_res$VBc),
+            c(cor_error_Wfn_res$svd_Zscore_c, ldprop_Wfn_res$svd_Zscore_c, ldr2_Wfn_res$svd_Zscore_c),
+            alternative = "t") %>% 
+  broom::tidy()
+```
+
+
+## Bishop toy example
+
+```{r}
+library(reticulate)
+library(gplots)
+library(tidyverse)
+library(cowplot)
+library(viridis)
+
+use_condaenv("csci567") #numpyro
+np <- import("numpy")
+
+folder <- "n100_p2k_new_gendata" 
+dat <- np$load(paste0(project,"/results/sim/", folder, "/toy_bishop/bishop.1.VB.tsvd.1.npz"))
+svdres <- t(dat['ZscoreC_Vh']) %*% diag(dat['ZscoreC_D'])
+vbres <- dat['VB_W']
+trueW <- cbind(dat['trueW'], matrix(rep(0, 10*5), nrow = 10, ncol = 5))
+         
+dev.off()
+p_vb <- vbres %>% as_tibble() %>% 
+  gather(key = "feature", value = "value", V1:V9) %>% 
+  mutate(Y = as.integer(gsub("V", "",  feature)), X = rep(1:10, 9), 
+         value = value / max(abs(value))) %>% 
+  ggplot(aes(x = Y, y = X, fill=value)) +
+    geom_tile()+
+    scale_fill_viridis(discrete=FALSE) +
+  scale_x_discrete(expand=c(0,0))+
+  scale_y_discrete(expand=c(0,0))+
+  xlab("Latent factor") + ylab("Loading")+
+  ggtitle("FactorGO")
+
+p_svd <- svdres %>% as_tibble() %>% 
+  gather(key = "feature", value = "value", V1:V9) %>% 
+  mutate(Y = as.integer(gsub("V", "",  feature)), X = rep(1:10, 9),
+         value = value / max(abs(value))) %>% 
+  ggplot(aes(x = Y, y = X, fill=value)) +
+    geom_tile()+
+    scale_fill_viridis(discrete=FALSE) +
+  scale_x_discrete(expand=c(0,0))+
+  scale_y_discrete(expand=c(0,0))+
+  xlab("Latent factor") + ylab("Loading")+
+  ggtitle("tSVD")
+
+p_all <- plot_grid(
+  p_vb + theme(legend.position="none"),
+  p_svd + theme(legend.position="right"),
+  align = 'h',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  label_size=10,
+  rel_widths = c(0.8, 1)
+)
+
+ggsave2(p_all, filename = paste0(plots_dir, "/Supp_sim_toy_bishop", ".png"), width =17.4, height = 7.6, dpi = 300, units = "cm")
+
+library(CCA)
+data(nutrimouse)
+X=as.matrix(nutrimouse$gene[,1:10])
+Y=as.matrix(nutrimouse$lipid)
+res.cc=cc(X,Y)
+plot(res.cc$cor,type="b")
+plt.cc(res.cc)
+```
+
+
