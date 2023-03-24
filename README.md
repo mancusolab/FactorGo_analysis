@@ -1,1 +1,1 @@
-/code: contains analysis code
+/code: contains analysis code for "A scalable variational approach to characterize pleiotropic components across thousands of human diseases and complex traits using GWAS summary statistics" (pre-print TBD)
