@@ -1,0 +1,2002 @@
+---
+title: "Analysis code"
+author: "Eleanor Zhang"
+date: '2022-08-15'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(data.table)
+library(ggrepel) # geom_label_repel
+library(RColorBrewer)
+library(kableExtra)
+library(cowplot)
+library(viridis)
+library(qvalue) # calculate q value for FDR
+mytheme <- theme_bw()+ 
+  theme(plot.title = element_text(size=6, face="bold"),
+        #plot.title = element_text(size=4.5, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        axis.text.x = element_text(size=6, face="bold",angle=30),
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6),
+        legend.position="bottom")
+
+# No angle in x axis for main plot
+mytheme_noangle <- theme_bw()+ 
+  theme(plot.title = element_text(size=6, face="bold"),
+        axis.title.x = element_text(size=6, face="bold"),
+        axis.title.y = element_text(size=6, face="bold"),
+        axis.text.x = element_text(size=6, face="bold"),
+        axis.text.y = element_text(size=6, face="bold"),
+        legend.text = element_text(size=6),
+        legend.position="bottom")
+
+fillcol <- c("FactorGo"="#D55E00", "tSVD"="#56B4E9")
+
+# AJHG plot guidelines
+## For 2-column formats (such as research articles and reviews), the sizes are 85 mm (1 column), 114 mm (1.5 columns), and 174 mm (full width of the page)
+full_width <- 17.4 # cm
+onecol_width <- 8.5 # cm
+full_height <- 7.6 # cm
+onecol_height <- 6.5 # cm
+
+datdir <- "sig_pval5e-08_nct2_maf1e-02_1kg"
+project <- getwd()
+plots_dir <- paste0(project, "/results/plots/paper/PanUKBB/")
+plots_dir
+source("./myfunction.R")
+```
+
+# Manifest file
+
+```{r}
+# manifest file
+manifest <- read_tsv("./data/ukbb/PanUKBB/phe2483.PanUKBB.tsv") 
+
+manifest <- manifest %>% 
+  mutate(Neff = ifelse(BIN_QT == "BIN", 2/(1/n_cases_EUR+1/n_controls_EUR), n_cases_EUR),
+         zcol = paste0("z", 1:nrow(manifest)),
+         coding = as.character(coding)) %>% 
+  select(trait_type:category, zcol, BIN_QT, N, Neff, filename)
+
+## h2 manifest file
+h2_manifest <- read_tsv("./data/ukbb/PanUKBB/PanUKB_h2_04112022.tsv") %>%
+  filter(pop=="EUR") %>%
+  select(trait_type:modifier, estimates.final.h2_z, estimates.final.h2_observed)
+
+manifest <- manifest %>%
+  left_join(h2_manifest, by=c(names(manifest)[1:5])) #%>%
+  #select(trait_type:category, zcol, BIN_QT, N, Neff, filename, estimates.final.h2_z)
+summary(manifest$estimates.final.h2_observed)
+summary(manifest$estimates.final.h2_z)
+
+## add unique description for each trait
+
+# 806 QT
+qt_manifest <- manifest %>% filter(BIN_QT == "QT") %>% 
+  add_count(description) %>% 
+  group_by(description) %>% 
+  mutate(dup_id = 1:n(),
+         clean_name = ifelse(n > 1, paste0(description, "_v", dup_id), description)) %>% 
+  ungroup() %>% 
+  select(zcol, clean_name)
+length(unique(qt_manifest$clean_name))
+
+# icd10, phecode: 1037
+icd10_phecode_manifest <- manifest %>% filter(trait_type %in% c("icd10", "phecode")) %>% 
+  mutate(clean_name = description) %>% 
+  select(zcol, clean_name)
+length(unique(icd10_phecode_manifest$clean_name))
+
+# prescriptions: 373
+prescriptions_manifest <- manifest %>% filter(trait_type == "prescriptions") %>% 
+  add_count(phenocode) %>% 
+  group_by(phenocode) %>% 
+  mutate(dup_id = 1:n(),
+    clean_name = ifelse(n > 1, paste0(phenocode, "_v",dup_id), phenocode)) %>% 
+  ungroup() %>% select(zcol, clean_name)
+length(unique(prescriptions_manifest$clean_name))
+
+# categorical: 267
+cat_manifest <- manifest %>% 
+  filter(trait_type == "categorical") %>% 
+  mutate(clean_name= ifelse(grepl("self-reported", description, ignore.case = T),paste0("self-report:",coding_description), paste0(description, ":", coding_description))) %>% 
+  mutate(clean_name = ifelse(grepl("COVID", phenocode),
+                             paste0(description, ":", modifier),
+                             clean_name)) %>%
+  add_count(clean_name) %>% 
+  group_by(clean_name) %>% 
+  mutate(dup_id = 1:n(),
+         clean_name = ifelse(n > 1, paste0(clean_name, "_v",dup_id), clean_name)) %>%
+  ungroup() %>% 
+  select(zcol, clean_name)
+length(unique(cat_manifest$clean_name))
+
+new_manifest <- qt_manifest %>% 
+  bind_rows(icd10_phecode_manifest) %>% 
+  bind_rows(prescriptions_manifest) %>% 
+  bind_rows(cat_manifest) 
+
+manifest <- manifest %>% left_join(new_manifest, by="zcol")
+
+# phe for plotting (short)
+phe <- manifest$clean_name; length(unique(phe))
+
+length(unique(phe))
+summary(manifest$N); sd(manifest$N)
+```
+
+## Distribution of sample size in 2483 traits
+```{r eval=FALSE}
+manifest %>%
+  ggplot(aes(x = N)) +
+  geom_histogram() +
+  facet_grid(. ~ BIN_QT) +
+  mytheme+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=0.5))
+
+ggsave2(paste0(plots_dir, "EUR_phe2483_N.png"),
+    width = onecol_width, height = 6.5, units = 'cm', dpi = 300)
+
+manifest %>% group_by(BIN_QT) %>% summarize(mean= mean(N), sd = sd(N), n = n())
+```
+
+# Results
+
+## Read result from FactorGO and tSVD
+
+```{r}
+K <- 100
+datdir <- "sig_pval5e-08_nct2_maf1e-02_1kg" 
+dat <- "sig_pval5e-08_nct2_maf1e-02_1kg" 
+scaledat <- "True"
+svdscale <- "snps"
+
+VB_Zm <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".Zm.tsv.gz"), col_names = F) %>% as.data.frame()
+# pxk
+VB_Wm  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".Wm.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_info  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".factor.tsv.gz"), col_names = F)
+names(VB_info) <- c("factor", "Ealpha", "R2")
+
+VB_EZ2  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".EZ2.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_EW2  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".EW2.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_Wvar <- read_tsv(paste0("./results/PanUKBB/", datdir,"/VB.", dat, ".k", K, ".scale", scaledat,".Wvar.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_trait_r2 <- read_tsv(paste0("./results/PanUKBB/", datdir,"/FactorGO_trait_fac_R2.tsv.gz"), col_names = T)
+colnames(VB_trait_r2) <- gsub("V", "X", colnames(VB_trait_r2))
+  
+svd_U <- read_tsv(paste0("./results/PanUKBB/", datdir, "/tsvd.", dat, ".", svdscale,".k", K, ".U.tsv.gz"), col_names = F) %>% as.data.frame()
+# pxk
+svd_V <- read_tsv(paste0("./results/PanUKBB/", datdir, "/tsvd.", dat, ".",svdscale, ".k", K,".V.tsv.gz"), col_names = F) %>% as.data.frame()
+svd_D <- read_tsv(paste0("./results/PanUKBB/", datdir, "/tsvd.", dat, ".",svdscale,".k", K, ".D.tsv.gz"), col_names = F) %>% pull(X1)
+svd_UD <- as.matrix(svd_U) %*% diag(svd_D); dim(svd_UD)
+svd_VD <- as.matrix(svd_V) %*% diag(svd_D); dim(svd_VD)
+svd_VD <- as.data.frame(svd_VD);svd_UD <- as.data.frame(svd_UD);
+
+svd_trait_r2 <- read_tsv(paste0("./results/PanUKBB/", datdir,"/tSVD_trait_fac_R2.tsv.gz"), col_names = T)
+colnames(svd_trait_r2) <- gsub("V", "X", colnames(svd_trait_r2))
+# calculated using vb R2 function
+svd_vbr2 <- read_tsv(paste0("./results/PanUKBB/", datdir, "/tsvd.", dat, ".",svdscale,".k", K, ".vbr2.tsv.gz"), col_names = F) %>% mutate(factor = 1:K)
+names(svd_vbr2) <- c("R2", "factor")
+
+## contribution scores: use standardized Z score
+VB_Zm2 <- VB_Zm^2
+VB_Wm2 <- VB_Wm^2
+VB_Zm_se <- sqrt(VB_EZ2-VB_Zm2)
+VB_Zm_std <- VB_Zm / VB_Zm_se
+VB_std_Zm2 <- VB_Zm_std^2
+
+phe_cntr_vb <- as.data.frame(t(t(VB_std_Zm2)/colSums(VB_std_Zm2))); colSums(phe_cntr_vb)
+var_cntr_vb  <- as.data.frame(t(t(VB_Wm2)/colSums(VB_Wm2))); colSums(var_cntr_vb)
+cosine_phe_vb  <- VB_std_Zm2/rowSums(VB_std_Zm2); rowSums(cosine_phe_vb); dim(cosine_phe_vb)
+
+# cosine score
+phe_cntr_svd <- svd_U^2; colSums(phe_cntr_svd) # sum to 1
+var_cntr_svd <- svd_V^2; colSums(var_cntr_svd) # sum to 1
+cosine_phe_svd <- as.data.frame(svd_UD^2/rowSums(svd_UD^2)); rowSums(cosine_phe_svd);
+
+# set all colnames consistent
+colnames(phe_cntr_svd) <- paste0("F", 1:K)
+colnames(phe_cntr_vb) <- paste0("F", 1:K)
+colnames(var_cntr_svd) <- paste0("F", 1:K)
+colnames(var_cntr_vb) <- paste0("F", 1:K)
+colnames(cosine_phe_svd) <- paste0("F", 1:K)
+colnames(cosine_phe_vb) <- paste0("F", 1:K)
+
+colnames(svd_VD) <- gsub("V", "X", colnames(svd_VD))
+colnames(svd_UD) <- gsub("V", "X", colnames(svd_UD))
+```
+
+
+## R2 and run time
+
+### Runtime
+```{r}
+tibble(Method = c("FactorGo on GPU", 
+                  "tSVD", 
+                  "vanilla FactorGo on GPU", 
+                  "vanilla FactorGo no JIT on GPU"),
+                  Time = c(10, 10, 630, 820)) %>% 
+  mutate(Method = fct_reorder(Method, Time, .desc = FALSE)) %>% 
+  ggplot(aes(x=Method, y=Time),  size = 2)+
+  geom_col(position = "dodge", fill="#999999", alpha=2) +
+  geom_text(stat='identity', aes(label=Time), 
+            hjust=-0.5, colour='red',fontface = "bold", size=3)+
+  ggtitle("Run time in Minutes") +
+  ylab("Run time (Minutes)") +
+  xlab("Method") +
+  ylim(0, 1000)+
+  coord_flip()+
+  mytheme+
+  theme(axis.text.y = element_text(size=7, face="bold"),
+        axis.text.x = element_text(size=7),
+        axis.title.x = element_text(size=7, face="bold"),
+        axis.title.y = element_text(size=7, face="bold"),
+        plot.title = element_text(size=7, face="bold"))
+
+ggsave2(filename = paste0(plots_dir, "runtime.png"), 
+       width = onecol_width, height = onecol_height, dpi = 300, units = "cm")
+```
+
+### R2 and alpha
+
+```{r}
+# R2 is already sorted (consistent with ordering of eigenvalues)
+is.unsorted(-svd_vbr2$R2)
+is.unsorted(-VB_info$R2)
+
+sum(VB_info$R2); sum(svd_vbr2$R2)
+cumsum(VB_info$R2) > cumsum(svd_vbr2$R2) # factor 61
+
+p_cumR <- svd_vbr2 %>% 
+  mutate(tSVD = cumsum(R2), FactorGo = cumsum(VB_info$R2)) %>%
+  gather(key = "method", value="R2", tSVD:FactorGo) %>%
+  ggplot(aes(x = factor, y = R2, color=method)) +
+  geom_point(size=1) + geom_line()+
+  ylab(bquote(R^2))+
+  scale_color_manual(values = fillcol) +
+  ggtitle("Cumulative R2")+xlab("Factor")+
+  annotate(geom="text", x=15, y=0.35, 
+           label="FactorGo:38.07% \n tSVD:37.76%",
+           size=2.5)+
+  mytheme_noangle
+
+p1 <- svd_vbr2 %>% mutate(tSVD = R2, FactorGo = VB_info$R2) %>%
+  gather(key = "method", value="R2", tSVD:FactorGo) %>%
+  ggplot(aes(x = factor, y = R2, color=method)) +
+  geom_point(size=1) +
+  ylab(bquote(R^2))+
+  scale_color_manual(values = cols) +
+  ggtitle("Scree plot")+
+  annotate(geom="text", x=85, y=0.04, 
+           label="Total R2 explained \n FactorGo:38.07% \n tSVD:37.76%",
+           size=2.5)+
+  mytheme
+
+p2 <- VB_info %>% 
+  ggplot(aes(x = Ealpha, y = R2)) +
+  geom_point(size=1, col="#D55E00") +
+  xlab(bquote(E*(alpha)))+
+  ylab(bquote(R^2))+
+  ggtitle(bquote(R^2*" versus "*E*(alpha)*" per factor")) +
+  mytheme  
+
+prow <- plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"),
+  align = 'vh',
+  hjust = -1, # -1
+  labels = "AUTO",
+  label_size = 8,
+  nrow = 1,
+  rel_heights = c(1, 1), 
+  rel_widths=c(1, 1)
+)
+
+legend_b <- get_legend(
+  p1 + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+plot_grid(prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+
+
+ggsave2(filename = paste0(plots_dir, "screeR2_Ealpha_grid.png"), 
+        width = full_width, height = full_height, dpi = 300, units = "cm")
+
+```
+
+## Latent factor Z
+
+### Biplot Z1 vs. Z2
+```{r plot pairwise Z}
+# use VB_Zm for this plotting and add error bar
+factor_sqr <- VB_Zm^2 #VB_Zm^2 # svd_U^2
+factor_Z <- as.data.frame(VB_Zm)
+
+# plot for leading 5 traits
+highlight_trait_f1_vb <- tibble(cntr_score = factor_sqr[, paste0("X1")], trait = phe) %>%  
+  slice_max(cntr_score, n = 5) %>% pull(trait)
+highlight_trait_f2_vb <- tibble(cntr_score = factor_sqr[, paste0("X2")], trait = phe) %>%  
+  slice_max(cntr_score, n = 5) %>% pull(trait)
+highlight_trait_f1_vb
+highlight_trait_f2_vb
+
+highlight_trait_vb <- c(highlight_trait_f1_vb, highlight_trait_f2_vb)
+label_name_vb <- manifest %>% filter(clean_name %in% highlight_trait_vb) %>% pull(clean_name); label_name_vb
+label_trait_name_vb <- c("COVID-19_v3", "COVID-19_v4", 
+                         "FEV1", 
+                         "Weight_v1", "IMT_120degrees", "IMT_150degrees", "IMT_210degrees",
+                         "Weight_v2",
+                         "Basal metabolic rate", "Standing height")
+
+p.Z1Z2.FactorGO <- plot_Z(VB_Zm, VB_Zm_se,"FactorGo", highlight_trait_vb, label_trait_name_vb, manifest)
+
+ggsave2(p1, filename = paste0(plots_dir, "FactorGO_Top2_Z1_Z2.png"), width =16, height = 15, dpi = 300, units = "cm")
+
+# tSVD
+factor_Z <- svd_UD
+factor_sqr <- factor_Z^2 #VB_Zm^2 # svd_U^2
+
+highlight_f1_svd <- tibble(cntr_score = factor_sqr[, "X1"], trait = phe) %>%  
+  slice_max(cntr_score, n = 5) %>% pull(trait)
+highlight_f2_svd <- tibble(cntr_score = factor_sqr[, "X2"], trait = phe) %>%  
+  slice_max(cntr_score, n = 5) %>% pull(trait)
+highlight_f1_svd
+highlight_f2_svd
+
+highlight_f_svd <- c(highlight_f1_svd, highlight_f2_svd)
+label_trait_name_svd <- manifest %>% filter(clean_name %in% highlight_f_svd) %>% 
+  pull(clean_name)
+
+label_trait_name_svd[c(2,8)] <- c("FVC_best","FVC")
+
+p.Z1Z2.tsvd <- plot_Z(svd_UD, NULL,"tSVD", highlight_f_svd, label_trait_name_svd, manifest)
+```
+
+## Variant PCA
+
+### Figure: F and L for top 2 factors
+```{r}
+# map to coding genes
+map_genes <- read_tsv(paste0("./results/PanUKBB/", datdir, "/allvar.pruned.closesttss.hugo")) %>% 
+  mutate(ID = paste0(SNP, ":", Gene_name))
+  
+method <- "tSVD" # tSVD, FactorGo
+
+if (method == "FactorGo"){
+  factor_sqr <- VB_Wm^2 #VB_Wm
+}else if (method == "tSVD"){
+  factor_sqr <- as.data.frame(svd_VD^2) #VB_Wm
+  colnames(factor_sqr) <- gsub("V", "X", colnames(factor_sqr))
+}
+
+highlight_var_f1 <- tibble(cntr_score = factor_sqr[, "X1"], trait = map_genes$SNP) %>%  
+  slice_max(cntr_score, n = 5) %>% 
+  pull(trait)
+highlight_var_f2 <- tibble(cntr_score = factor_sqr[, "X2"], trait = map_genes$SNP) %>%  
+  slice_max(cntr_score, n = 5) %>% pull(trait)
+
+highlight_var <- c(highlight_var_f1, highlight_var_f2); highlight_var
+
+label_var <- map_genes %>% filter(SNP %in% highlight_var) %>% 
+  mutate(snp_gene = paste0(SNP, "(", Gene_name, ")")) %>% 
+  pull(snp_gene)
+
+if (method == "FactorGo"){
+  p.var.FactorGO <- plot_W(VB_Wm, "FactorGo", highlight_var, label_var, map_genes)
+}else{
+  p.var.tsvd <- plot_W(svd_VD, "tSVD", highlight_var, label_var, map_genes)
+}
+
+plot_grid(
+  p.Z1Z2.FactorGO + theme(legend.position="none") + ggtitle("FactorGo")+
+    theme(plot.title = element_text(size = 8)), 
+  p.var.FactorGO + theme(legend.position="none") + ggtitle("FactorGo")+
+    theme(plot.title = element_text(size = 8)),
+  p.Z1Z2.tsvd + theme(legend.position="none") + ggtitle("tSVD")+
+    theme(plot.title = element_text(size = 8)), 
+  p.var.tsvd + theme(legend.position="none") + ggtitle("tSVD")+
+    theme(plot.title = element_text(size = 8)),
+  align = 'vh',
+  labels = 'AUTO',
+  hjust = -1, # -1
+  nrow = 2,
+  ncol = 2,
+  label_size=10
+)
+
+ggsave2(filename = paste0(plots_dir, "Top2_Zm_Wm_grid_both.png"), 
+        width = full_width, height = full_height*2, dpi = 300, units = "cm")
+```
+
+## Power
+
+### Trait factor score with h2
+
+```{r}
+summary(manifest$estimates.final.h2_observed) # 178 missing
+manifest %>% filter(is.na(estimates.final.h2_observed)) %>% pull(trait_type) %>% table()
+
+svd_PC <- svd_UD^2
+
+p_vec_vb <- c()
+z_vec_vb <- c()
+p_vec_svd <- c()
+z_vec_svd <- c()
+
+for (i in 1:K){
+  # has missing values in estimates.final.h2_observed
+  res_single_vb <- lm(VB_Zm2[, i] ~ manifest$estimates.final.h2_observed) %>%
+    broom::tidy() %>%
+    filter(term == "manifest$estimates.final.h2_observed")
+  p_vec_vb <- c(p_vec_vb, res_single_vb$p.value)
+  z_vec_vb <- c(z_vec_vb, res_single_vb$statistic)
+
+  res_single_svd <- lm(svd_PC[, i] ~ manifest$estimates.final.h2_observed) %>%
+    broom::tidy() %>%
+    filter(term == "manifest$estimates.final.h2_observed")
+  p_vec_svd <- c(p_vec_svd, res_single_svd$p.value)
+  z_vec_svd <- c(z_vec_svd, res_single_svd$statistic)
+}
+
+lm(z_vec_vb ~ c(1:100)) %>% broom::tidy() %>% pull(p.value)
+lm(z_vec_svd ~ c(1:100)) %>% broom::tidy() %>% pull(p.value)
+
+p_vb <- tibble(Factor = 1:K, Z = z_vec_vb) %>% 
+  ggplot(aes(x = Factor, y = Z))+
+  geom_point(size=0.7)+
+  stat_smooth(method="lm")+
+  annotate(geom="text", x=90, y=28, 
+           label="p = 1.99e-17", size=3)+
+  ggtitle("FactorGo")+
+  mytheme
+
+p_svd <- tibble(Factor = 1:K, Z = z_vec_svd) %>% 
+  ggplot(aes(x = Factor, y = Z))+
+  geom_point(size=0.7)+
+  stat_smooth(method="lm")+
+  annotate(geom="text", x=90, y=29, 
+           label="p = 2.99e-18", size=3)+
+  ggtitle("tSVD")+
+  mytheme
+
+plot_grid(
+  p_vb, 
+  p_svd,
+  align = 'vh',
+  hjust = -1, # -1
+  labels = "AUTO",
+  label_size = 8,
+  nrow = 1,
+  rel_heights = c(1, 1), 
+  rel_widths=c(1, 1)
+)
+
+ggsave2(paste0(plots_dir, "FactorGO_Zm2_h2.png"), 
+        width = full_width, height = full_height, units = 'cm', dpi = 300)
+```
+
+### Cumulative cosine score 
+
+```{r}
+phe_cosine_vb_long <- cosine_phe_vb %>% 
+  mutate(trait = phe, Neff = manifest$Neff, 
+         N=manifest$N) %>% 
+  gather(key=fac, value=vb_score, F1:F100) %>% 
+  mutate(fac = as.integer(gsub("F", "", fac))) %>% 
+  group_by(trait) %>% 
+  arrange(trait,desc(vb_score)) %>% 
+  mutate(factor_rank = 1:100,
+         cum_cosine = cumsum(vb_score)) %>% 
+  ungroup()
+
+phe_cosine_svd_long <- cosine_phe_svd %>% 
+  mutate(trait = phe, Neff = manifest$Neff, 
+         N=manifest$N) %>% 
+  gather(key=fac, value=svd_score, F1:F100) %>% 
+  mutate(fac = as.integer(gsub("F", "", fac))) %>% 
+  group_by(trait) %>% 
+  arrange(trait,desc(svd_score)) %>% 
+  mutate(factor_rank = 1:100,
+         cum_cosine = cumsum(svd_score)) %>% 
+  ungroup()
+
+all_cosine <- tibble(rank_idx = phe_cosine_vb_long$factor_rank,
+                      FactorGo = phe_cosine_vb_long$cum_cosine,
+                      tSVD = phe_cosine_svd_long$cum_cosine,
+                      Neff = phe_cosine_svd_long$N,
+                     trait = phe_cosine_svd_long$trait) %>% 
+  mutate(ratio = FactorGo/tSVD) %>% 
+  group_by(rank_idx) %>% 
+  mutate(mean_ratio = mean(ratio)) %>% 
+  ungroup()
+
+hist(all_cosine$FactorGo)
+wilcox.test(all_cosine %>% filter(rank_idx == 1) %>% pull(FactorGo), 
+            all_cosine %>% filter(rank_idx == 1) %>% pull(tSVD))
+
+all_cosine %>% 
+  #filter(rank_idx == 1) %>% 
+  ggplot(aes(x = tSVD, y = FactorGo, color = Neff), shape=1)+
+  geom_point(shape=1)+
+  scale_color_viridis(option="viridis")+
+  geom_abline(intercept = 0, slope = 1)+
+  mytheme + 
+  xlab("tSVD") + ylab("FactorGo")
+
+mean(all_cosine %>% filter(rank_idx == 99) %>% pull(FactorGo)) - mean(all_cosine %>% filter(rank_idx == 95) %>% pull(tSVD))
+hist(all_cosine %>% filter(rank_idx == 99) %>% pull(FactorGo))
+
+all_cum_test <- rep(NA, 100)
+all_cum_meandiff <- rep(NA, 100)
+for (idx in 1:100){
+  pval <- wilcox.test(all_cosine %>% filter(rank_idx == idx) %>% pull(FactorGo),
+                      all_cosine %>% filter(rank_idx == idx) %>% pull(tSVD)) %>% 
+    broom::tidy() %>% 
+    pull(p.value)
+  
+  all_cum_test[idx] <- pval
+  
+  all_cum_meandiff[idx] <- median(all_cosine %>% filter(rank_idx == idx) %>% pull(FactorGo)) - median(all_cosine %>% filter(rank_idx == idx) %>% pull(tSVD))
+}
+
+length(all_cum_test[all_cum_test < 0.05/99])
+summary(all_cum_meandiff) # all greater than 0
+
+# viridis, 
+p.allcosine <- all_cosine %>% 
+  ggplot(aes(x = rank_idx, y = log(ratio)))+
+  geom_point(size=0.5, alpha = 1, color = "grey65")+
+  geom_line(aes(y = log(mean_ratio)), color = "red")+
+  geom_abline(intercept = 0, slope = 0)+
+  ylab("Log ratio of cumulative cosine score") +
+  xlab("Factor rank")+
+  mytheme_noangle+
+  theme_classic()+
+  theme(axis.title.x = element_text(size=6, face="bold"),
+          axis.title.y = element_text(size=6, face="bold"),
+          axis.text.x = element_text(size=5),
+          axis.text.y = element_text(size=5))+
+  theme(plot.margin = margin(l=6, t=0, b=0, r=0, 'pt'))
+
+p_cumR <- p_cumR + theme_classic() + theme(legend.title = element_text(size=5),
+                 legend.text = element_text(size=5),
+                 legend.position = c(0.8, 0.18),
+                 legend.key.size = unit(0.6, 'cm'),
+                 plot.title = element_text(size = 10),
+                 axis.title.x = element_text(size=6, face="bold"),
+                 axis.title.y = element_text(size=6, face="bold"),
+                 axis.text.x = element_text(size=5),
+                 axis.text.y = element_text(size=5))
+
+p.Z1Z2.FactorGO <- p.Z1Z2.FactorGO+mytheme_noangle+theme_classic()+
+    theme(legend.position = c(0.9, 0.18),
+          legend.key.size = unit(0.3, 'cm'),
+          legend.title = element_text(size=6),
+          legend.text = element_text(size=4),
+          axis.title.x = element_text(size=6, face="bold"),
+          axis.title.y = element_text(size=6, face="bold"),
+          axis.text.x = element_text(size=5),
+          axis.text.y = element_text(size=5))
+ 
+prow <- plot_grid(
+  p_cumR,
+  p.Z1Z2.FactorGO, 
+  align = 'h',
+  labels = "AUTO",
+  hjust = -1,
+  nrow = 1,
+  label_size=10,
+  rel_widths = c(1, 1)
+)
+
+plot_grid(
+  prow, p.allcosine,
+  align = 'v',
+  labels=c("", "C"),
+  # labels = c("", "C"),
+  # hjust = -1,
+  ncol = 1,
+  label_size=10, 
+  rel_heights = c(1, 0.8),
+  rel_widths = c(1, 1),
+  axis = 'r'
+)
+
+ggsave2(paste0(plots_dir, "Fig4_logratio.png"), 
+        width = full_width, height = full_height*1.85, units = 'cm', dpi = 300)
+```
+
+
+# Case studies
+
+## Find top factors
+
+```{r}
+traits_core <- c("Standing height", 
+                 "Cancer of prostate",
+                 "Body mass index (BMI)_1",
+                 "Rheumatoid arthritis")
+print_val <- FALSE
+method <- "FactorGo"
+
+if (method == "FactorGo"){
+  cosine_phe_dat <- cosine_phe_vb 
+}else{
+  cosine_phe_dat <- cosine_phe_svd
+}
+
+p1 <- find_topF(cosine_phe_dat, "Body mass index (BMI)_1", "BMI", method, phe, K, print_val)
+p2 <- find_topF(cosine_phe_dat, "Standing height", "height", method, phe, K, print_val)
+p3 <- find_topF(cosine_phe_dat, "Rheumatoid arthritis", "RA", method, phe, K, print_val)
+p4 <- find_topF(cosine_phe_dat, "Cancer of prostate", "PCa", method, phe, K, print_val)
+
+find_topF(cosine_phe_dat, "pheno 48 / pheno 49", "PCa", method, phe, K, print_val)
+
+plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"), 
+  p3 + theme(legend.position="none"),
+  p4 + theme(legend.position="none"),
+  align = 'h',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  #label_size=10,
+  rel_heights = c(1, 1, 1, 1), rel_widths=c(1,1,1,1)
+)
+
+ggsave2(paste0(plots_dir , "topfactor_4traits_", method, "_K", K, "_wtZ_grid.png"), width = 25, height = 8, units = 'cm', dpi = 300)
+```
+
+## Report contribution score (Supplemental)
+
+```{r}
+manifest %>% 
+  filter(grepl("IGF-1", clean_name, ignore.case = TRUE)) %>% View
+
+manifest %>% 
+  filter(grepl(" fat ", clean_name, ignore.case = TRUE)) %>% 
+  filter(!grepl("intake", clean_name)) %>% 
+  select(phenocode, description) %>% 
+  xlsx::write.xlsx(file = paste0(plots_dir, "FactorGO_bodyfat.xlsx"),
+      sheetName = "fat", append = FALSE)
+
+manifest %>% 
+  filter(grepl("osteoporosis", clean_name, ignore.case = TRUE)) %>% 
+  filter(trait_type != "prescriptions") %>% 
+  select(trait_type, phenocode, clean_name) %>% 
+  xlsx::write.xlsx(file = paste0(plots_dir, "FactorGO_osteoporosis.xlsx"),
+      sheetName = "osteoporosis", append = FALSE)
+
+# Factor 1 (summed fat trait)
+tibble(cntr_score = phe_cntr_vb[, "F4"], trait = phe) %>% 
+      filter(grepl(" fat ", trait)) %>% 
+  filter(!grepl("intake", trait)) %>% 
+  pull(cntr_score) %>% sum()
+
+tibble(cntr_score = phe_cntr_vb[, "F1"], trait = phe) %>% 
+      filter(grepl("Weight_", trait)) %>% 
+  pull(cntr_score) %>% sum()
+
+tibble(cntr_score = phe_cntr_vb[, "F1"], trait = phe) %>% 
+      filter(grepl("Basal", trait)) %>% View
+  pull(cntr_score) %>% sum()
+  
+tibble(cntr_score = phe_cntr_vb[, "F86"], trait = phe) %>% 
+      filter(grepl("osteoporosis", trait, ignore.case = TRUE)) %>% 
+      filter(!grepl("bisphosphanate", trait)) %>% 
+  pull(cntr_score) %>% sum()
+      
+tibble(cntr_score = phe_cntr_vb[, "F55"], trait = phe) %>% 
+        filter(grepl("phosphatase", trait, ignore.case = TRUE)) %>% View
+      # filter(!grepl("bisphosphanate", trait)) %>% 
+        pull(cntr_score) %>% sum()
+
+map_genes %>% mutate(score = var_cntr_vb[, "F75"]*100) %>% 
+  arrange(desc(score)) %>% 
+  View
+
+manifest %>% 
+  mutate(cntr_score = phe_cntr_vb[, "F7"]*100) %>% 
+  filter(grepl("pressure", clean_name) & trait_type == "continuous" & !grepl("Age|ocular", clean_name)) %>% # View
+  pull(cntr_score) %>% sum()
+
+manifest %>% 
+  mutate(cntr_score = phe_cntr_vb[, "F75"]*100) %>% 
+  slice_max(cntr_score, n = 20) %>% View
+  filter(grepl("pressure", clean_name) & trait_type == "continuous" & !grepl("Age|ocular", clean_name)) %>% # View
+  pull(cntr_score) %>% sum()
+  
+manifest %>% 
+    mutate(cntr_score = phe_cntr_vb[, "F58"]*100) %>% 
+    slice_max(cntr_score, n = 20) %>% View
+  
+manifest %>% 
+  filter(grepl(" fat ", clean_name)) %>% 
+  filter(!grepl("intake", clean_name)) %>% 
+  summarize(mean_h2 = mean(estimates.final.h2_observed))
+
+manifest %>% 
+  filter(grepl("COVID", clean_name)) %>% View
+  summarize(mean_h2 = mean(estimates.final.h2_observed)) %>% View
+```
+
+## Shorten trait names
+
+```{r}
+phe[phe == "COVID-19 positive (controls include untested), only patients from centers in England:4"] <- "COVID-19 positive_4 (England)"
+phe[phe == "COVID-19 positive (controls include untested):4"] <-  "COVID-19 positive_4"
+phe[phe == "COVID-19 positive (controls include untested), only patients from centers in England:3"] <- "COVID-19 positive_3 (England)"
+phe[phe == "COVID-19 positive (controls include untested):3"] <- "COVID-19 positive_3"
+phe[phe == "COVID-19 positive (controls only COVID-19 negative):4"] <- "COVID-19 positive vs.negative_4"
+phe[phe == "COVID-19 positive (controls only COVID-19 negative):3"] <- "COVID-19 positive vs.negative_3"
+
+phe[phe == "L57 Skin changes due to chronic exposure to nonionising radiation"] <- "L57 Skin changes due to radiation"
+phe[phe == "Toxic effect of (non-ethyl) alcohol and petroleum and other solvents"] <- "Toxic effect of (non-ethyl) alcohol and other solvents" 
+phe[phe == "Malignant neoplasm of other and ill-defined sites within the digestive organs and peritoneum"] <- "Malignant neoplasm in the digestive organs and peritoneum"
+
+phe[phe == "Forced vital capacity (FVC)"] <- "FVC"
+phe[phe == "Forced expiratory volume in 1-second (FEV1)"] <- "FEV1"
+phe[phe == "Forced expiratory volume in 1-second (FEV1), Best measure"] <- "FEV1 (best)"
+
+phe[phe == "Osteoporosis, osteopenia and pathological fracture"] <- "Osteoporosis, osteopenia and others"
+phe[phe == "X61 Intentional self-poisoning by and exposure to antiepileptic, sedative-hypnotic, anti-Parkinsonism and psychotropic drugs, not elsewhere classified"] <- "X61 Intentional self-poisoning by drugs"
+phe[phe == "M81 Osteoporosis without pathological fracture"] <- "M81 Osteoporosis no pathological fracture"
+phe[phe == "Inflammatory bowel disease and other gastroenteritis and colitis"] <- "IBD and other gastroenteritis and colitis"
+phe[phe == "T43 Poisoning by psychotropic drugs, not elsewhere classified"] <- "T43 Poisoning by psychotropic drugs"
+phe[phe == "folic acid supplement|Food Supplement"] <- "folic acid supplement"
+phe[phe == "X60 Intentional self-poisoning by and exposure to nonopioid analgesics, antipyretics and antirheumatics"] <- "X60 Intentional self-poisoning"
+phe[phe == "T39 Poisoning by nonopioid analgesics, antipyretics and antirheumatics"] <- "T39 Poisoning by drugs"
+
+phe[phe == "Forced expiratory volume in 1-second (FEV1), predicted"] <- "FEV1 (predict)"
+phe[phe == "Forced vital capacity (FVC), Best measure"] <- "FVC (best)"
+
+phe[phe == "Osteoporosis, osteopenia and pathological fracture"] <- "Osteoporosis, osteopenia and others"
+phe[phe == "M81 Osteoporosis without pathological fracture"] <- "M81 Osteoporosis"
+phe[phe == "Inflammatory bowel disease and other gastroenteritis and colitis"] <- "IBD and other gastroenteritis and colitis"
+phe[phe == "T43 Poisoning by psychotropic drugs, not elsewhere classified"] <- "T43 Poisoning by drugs"
+phe[phe == "folic acid supplement|Food Supplement"] <- "folic acid supplement"
+phe[phe == "T39 Poisoning by nonopioid analgesics, antipyretics and antirheumatics"] <- "T39 Poisoning by drugs"
+
+phe[phe == "N32 Other disorders of bladder"] <- "N32 Other bladder disorders"
+
+phe[phe == "Systolic blood pressure, automated reading, adjusted by medication"] <- "SBP (auto_medadj)"
+phe[phe == "Mean arterial pressure, automated reading, adjusted by medication"] <- "Mean arterial pressure (auto_medadj)"
+phe[phe == "Systolic blood pressure, combined automated + manual reading, adjusted by medication"] <- "SBP (combined_medadj)"
+phe[phe == "Mean arterial pressure, combined automated + manual reading, adjusted by medication"] <- "Mean arterial pressure (combined_medadj)"
+phe[phe == "Systolic blood pressure, automated reading"] <- "SBP (auto)"
+phe[phe == "Diastolic blood pressure, automated reading, adjusted by medication"] <- "DBP (auto_medadj)"
+phe[phe == "Pulse pressure, automated reading, adjusted by medication"] <- "Pulse pressure (auto_medadj)"
+phe[phe == "Mean arterial pressure, automated reading"] <- "Mean arterial pressure (auto)"
+phe[phe == "Systolic blood pressure, combined automated + manual reading"] <- "SBP (combined)"
+phe[phe == "Pulse pressure, adjusted by medication"] <- "Pulse pressure (medadj)"
+phe[phe == "Diastolic blood pressure, combined automated + manual reading, adjusted by medication"] <- "DBP (combined_medadj)"
+phe[phe == "Pulse pressure, automated reading"] <- "Pulse pressure (auto)" 
+phe[phe == "Mean arterial pressure, combined automated + manual reading"] <- "Mean arterial pressure (combined)"
+phe[phe == "Pulse pressure, combined automated + manual reading"] <- "Pulse pressure (combined)"
+phe[phe == "Pulse pressure, combined automated + manual reading, adjusted by medication"] <- "Pulse pressure (combined_medadj)"
+
+phe[phe == "G55 Nerve root and plexus compressions in diseases classified elsewhere"] <- "G55 Nerve root and plexus compressions in diseases"
+phe[phe == "E87 Other disorders of fluid, electrolyte and acid-base balance"] <- "E87 Other disorders of fluid*"
+
+phe[phe == "Treatment/medication code:levothyroxine sodium"] <- "levothyroxine sodium (med)"
+phe[phe == "Home location - north co-ordinate (rounded)"] <- "Home location - north co-ordinate"
+phe[phe == "Home location at assessment - north co-ordinate (rounded)"] <- "Home location at assessment - north co-ordinate"
+phe[phe == "Home location - east co-ordinate (rounded)"] <- "Home location - east co-ordinate"
+phe[phe == "Home location at assessment - east co-ordinate (rounded)"] <- "Home location at assessment - east co-ordinate" 
+
+phe[phe == "Heel bone mineral density (BMD)"] <- "Heel BMD"
+phe[phe == "Heel bone mineral density (BMD) T-score, automated"] <- "Heel BMD T-score (auto)"
+phe[phe == "Heel quantitative ultrasound index (QUI), direct entry"] <- "Heel QUI (direct entry)"
+phe[phe == "Heel Broadband ultrasound attenuation, direct entry"] <- "Heel BUA (direct entry)"
+phe[phe == "Heel bone mineral density (BMD) (right)"] <- "Heel BMD (right)"
+phe[phe == "Heel bone mineral density (BMD) T-score, automated (right)"] <- "Heel BMD T-score (auto,right)" 
+phe[phe == "Heel quantitative ultrasound index (QUI), direct entry (right)"] <- "Heel QUI (direct entry,right)"
+phe[phe == "Heel bone mineral density (BMD) T-score, automated (left)"] <- "Heel BMD T-score (auto,left)"
+phe[phe == "Heel quantitative ultrasound index (QUI), direct entry (left)"] <- "Heel QUI (direct,left)"
+phe[phe == "Heel bone mineral density (BMD) (left)"] <- "Heel BMD (left)"
+phe[phe == "Heel broadband ultrasound attenuation (right)"] <- "Heel BUA (right)"
+phe[phe == "Heel broadband ultrasound attenuation (left)"] <- "Heel BUA (left)"
+
+phe[phe == "O32 Maternal care for known or suspected malpresentation of foetus"] <- "O32 known or suspected malpresentation of foetus"
+phe[phe == "Rheumatoid arthritis and other inflammatory polyarthropathies"] <- "RA and other inflammatory polyarthropathies"
+
+phe[phe == "Average night-time sound level of noise pollution"] <- "Average night-time noise pollution"
+phe[phe == "Average daytime sound level of noise pollution"] <- "Average daytime noise pollution"
+phe[phe == "Average 16-hour sound level of noise pollution"] <- "Average 16-hour noise pollution"
+phe[phe == "Average 24-hour sound level of noise pollution"] <- "Average 24-hour noise pollution"
+phe[phe == "Average evening sound level of noise pollution"] <- "Average evening noise pollution"
+phe[phe == "Contracture of palmar fascia [Dupuytren's disease]"] <- "Dupuytren's disease"
+
+length(unique(phe))
+```
+
+# Enrichment results
+
+## Annotation file
+```{r}
+which_annot <- "SEG" # or IMPACT
+
+# clean up Annotation name for plot
+if (which_annot == "SEG"){
+
+  ref_init <- read_tsv(paste0("./data/Annotation/Multi_tissue_gene_expr.ldcts"),F) %>% 
+    separate(X2, into=c("case", "control"),sep=",") %>% 
+    mutate(GTEx = ifelse(grepl("GTEx", case), TRUE, FALSE),
+           tissue_clean = ifelse(GTEx == 1, 
+                                 str_replace_all(X1, "[^[:alnum:]]", "_"), X1),
+           annot_order = 1:nrow(.)) %>% 
+    rename(tissue = X1) %>% 
+    select(-c(case, control))
+  
+  gtex_group <- readxl::read_excel(paste0("./data/Annotation/SEG_cellgroup.xlsx"),
+                                   sheet=2,skip=1) %>% 
+    janitor::clean_names() %>%
+    select(tissue, tissue_category_for_display) %>% 
+    mutate(tissue_clean=str_replace_all(tissue, "[^[:alnum:]]", "_")) %>% 
+    select(-tissue)
+
+  ref_gtex <- ref_init %>% inner_join(gtex_group, by="tissue_clean") %>% 
+     select(tissue, tissue_clean, tissue_category_for_display,annot_order, GTEx)
+     
+  
+   ref_franke <- readxl::read_excel(paste0("./data/Annotation/SEG_cellgroup.xlsx"),sheet=3,skip=1) %>%janitor::clean_names() %>% mutate(annot_order=NA, GTEx=NA) %>% 
+     select(colnames(ref_gtex))
+   
+   ref <- ref_gtex %>% bind_rows(ref_franke) %>% 
+     select(-c(annot_order)) %>% 
+     left_join(ref_init, by="tissue") %>% 
+     select(-c(GTEx.x, tissue_clean.y)) %>% 
+     rename(GTEx = GTEx.y, tissue_clean = tissue_clean.x) %>% 
+     mutate(tissue_clean = ifelse(GTEx == TRUE, tissue, tissue_clean)) %>% 
+     rename(tissue_group=tissue_category_for_display) %>% 
+     mutate(tissue_group = ifelse(tissue_group == "Musculoskeletal/connective", "Musculoskeletal/Connective", tissue_group)) %>% 
+     arrange(annot_order) %>% 
+     select(-c(GTEx,annot_order))
+   
+   ref <- ref %>% mutate(tissue_clean = tolower(tissue_clean),
+                  tissue_clean_nodupid = tissue_clean) %>% 
+     add_count(tissue_clean) %>% 
+     group_by(tissue_clean) %>% 
+     mutate(dup_id = 1:n(),
+         tissue_clean = ifelse(n > 1, paste0(tissue_clean, "_", dup_id), tissue_clean)) %>% 
+     ungroup() %>% 
+     select(-c(n, dup_id)) %>% 
+     mutate(tissue_clean_nodupid = gsub("_", " ", tissue_clean_nodupid))
+  
+   SEG_Finucane <- readxl::read_excel("./ref/Genetics/Finucane2018_supptable.xlsx", sheet = 6, skip = 1) %>% 
+     janitor::clean_names()
+   
+   # change cells transformed fibroblast to connective tissue
+}else if (which_annot == "IMPACT"){
+ ref <- read_tsv("./data/Annotation/IMPACT_annotation_key.txt") %>% 
+  mutate(CellDeriv = ifelse(CellDeriv == "T.cell", "T cell", CellDeriv),
+         CellDeriv = str_replace(CellDeriv, " ", "_"),
+         ID = paste0(TF, ":", Tissue,"_", CellDeriv,"_",Cell)) %>% 
+   distinct(IMPACT, .keep_all = T) %>% 
+   arrange(IMPACT) %>% 
+   mutate(Tissue = ifelse(Tissue == "OTHERS", "SPLEEN", Tissue),
+          tissue = paste0("Annot", 1:707)) %>% 
+   rename(tissue_clean=ID,
+          tissue_group = Tissue)
+}
+
+```
+
+## Read ldsc-SEG results
+```{r}
+# allfac or focal 
+# wt_cosine result
+allfac <- ifelse(which_annot == "SEG", "allfac", "focal"); allfac
+vb_res <- read_tsv(paste0("./results/PanUKBB/", datdir, "/enrich/", which_annot, "/ldsc_cts/vb.scaleTRUE.K100.", allfac ,".pseudoNTRUE.wt_cosine.4400blocks.cell_type_results.txt")) %>% 
+  rename(pval=Coefficient_P_value,
+         slope_obs=Coefficient,
+         slope_se=Coefficient_std_error) %>% 
+  mutate(enrich_z = slope_obs/slope_se,
+         neglogp = -log10(pval)) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level=0.05, lambda = 0)$qval,
+         neglogq = -log10(qval)) %>% 
+  ungroup()
+
+
+svd_res <- read_tsv(paste0("./results/PanUKBB/", datdir, "/enrich/", which_annot, "/ldsc_cts/svd.scalesnps.K100.", allfac, ".pseudoNTRUE.4400blocks.cell_type_results.txt")) %>% 
+  rename(pval=Coefficient_P_value,
+         slope_obs=Coefficient,
+         slope_se=Coefficient_std_error) %>% 
+  mutate(enrich_z = slope_obs/slope_se,
+         neglogp = -log10(pval)) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level=0.05, lambda = 0)$qval,
+         neglogq = -log10(qval)) %>% 
+  ungroup()
+
+if (which_annot == "SEG"){
+ cols_tissue_group <- c("Adipose" = "#0072B2","Blood/Immune"="#661100",
+                       "Cardiovascular" ="#009E73", "CNS"="#88CCEE",
+                       "Digestive"="#F0E442","Endocrine"="#D55E00",
+                       "Liver"="#999933", "Musculoskeletal/Connective"="#CC79A7", "Other"="#999999") 
+}else if (which_annot == "IMPACT"){
+  cols_tissue_group <- c("ADIPOCYTE" = "#E69F00","ADRENAL"="#56B4E9",
+                       "BLOOD" ="#F0E442", "BONE"="#D55E00", "BREAST"="#CC79A7",
+                       "EYE"="#332288", "FIBROBLAST"="#88ccee", "GI"="#999933",
+                       "HEART"="#ee3377",
+                       "KIDNEY"="#555555","LIVER"="#bbcc33", "LUNG"= "#44aa99",
+                       "MELANOMA"="#dddddd", "MUSCLE"="#aa3377", "NEURAL"="#4477aa",
+                       "PANCREAS"="#228833", "PROSTATE"="#004488",
+                       "SARCOMA"="#cceeff",
+                       "SKIN"="#eeeebb", "SPLEEN"="#ee8866", "STEMCELL"="#ffaabb",
+                       "UTERUS"="#663333", "VASCULAR"="#882255")
+}
+
+```
+
+## Compare enrichment results 
+
+```{r}
+vb_res %>% 
+  rename(FactorGo = enrich_z) %>% 
+  mutate(tSVD = svd_res$enrich_z) %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  gather(key = "method", value="enrich_z", c(FactorGo, tSVD)) %>% 
+  ggplot(aes(x=method, y=enrich_z, fill=method))+
+  geom_violin(trim=FALSE)+
+  geom_boxplot(outlier.size = 1, width=0.1) +
+  annotate(geom="text", x=2.25, y=8, 
+           label="FactorGo mean: 0.051 \n tSVD mean: -0.042 \n p = 2.58e-10",
+           size=2)+
+  scale_fill_manual(values=fillcol) +
+  ylab("enrich Z statistics") +
+  xlab("method")+
+  mytheme
+
+ggsave2(paste0(plots_dir, "VB_svd_compare_allenrichz.png"),
+       width = onecol_width, height = 8.0, units = 'cm', dpi = 300)
+  
+## count number of significant
+vb_res_sig <- vb_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         nsig_pos = sum(slope_obs > 0 & qval < 0.05)) %>% 
+  ungroup() %>% 
+  group_by(tissue_group) %>% 
+  summarize(nsig_pos = sum(nsig_pos)) %>% 
+  arrange(tissue_group)
+
+# lambda=0 or not
+svd_res_sig <- svd_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         nsig_pos = sum(slope_obs > 0 & qval < 0.05)) %>% 
+  ungroup() %>% 
+  group_by(tissue_group) %>% 
+  summarize(nsig_pos = sum(nsig_pos)) %>% 
+  arrange(tissue_group)
+
+vb_res_sig %>% 
+  rename(FactorGo = nsig_pos) %>% 
+  mutate(tSVD = svd_res_sig$nsig_pos) %>% 
+  gather(key = "method", value="nsig", c(FactorGo, tSVD)) %>% 
+  ggplot(aes(x=tissue_group, y=nsig, fill=method))+
+  geom_bar(position="dodge", stat="identity") +
+  scale_fill_manual(values=fillcol) +
+  theme_bw() +
+  ggtitle(paste("FactorGo idenfied more enriched annotations than tSVD (FDR<0.05)")) +
+  ylab("Count of significant annotations") +
+  xlab("Tissue group")+
+  theme(legend.position="bottom",
+        axis.title.y = element_text(size=12, face="bold"),
+        axis.title.x = element_text(size=12, face="bold"),
+        axis.text.x = element_text(size=12, face="bold",
+                                   angle = 45, vjust = 0.5, hjust=0.5),
+        axis.text.y = element_text(size=12,face="bold"),
+        title = element_text(size=10, face="bold"))
+
+ggsave2(paste0(plots_dir, "VB_svd_nsig_compare_bygroup.png"),width = 22, height = 15, units = 'cm', dpi = 300)
+
+
+t.test(vb_res$enrich_z, 
+       svd_res$enrich_z)
+
+sum(vb_res_sig$nsig_pos)
+sum(svd_res_sig$nsig_pos)
+
+vb_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         sig = ifelse(slope_obs > 0 & qval < 0.05, 1, 0)) %>% 
+  summarise(n = sum(sig)) %>% summary()
+  # ungroup() %>% 
+  # filter(sig == 1) %>% 
+  # distinct(tissue_clean)
+
+# 191
+tab <- matrix(c(191, 205-191, 
+                130, 205-130), 
+              ncol = 2, byrow = TRUE)
+
+prop.test(tab)
+chisq.test(tab)
+
+svd_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         sig = ifelse(slope_obs > 0 & qval < 0.05, 1, 0)) %>% 
+  summarize(n = sum(sig)) %>% summary()
+
+vb_wide <- vb_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         sig = ifelse(slope_obs > 0 & qval < 0.05, 1, 0)) %>% 
+  ungroup() %>% 
+  select(Factor, sig, tissue_clean) %>% 
+  spread(Factor, sig)
+vb_wide_mat <- vb_wide %>% select(-tissue_clean) %>% as.matrix()
+rownames(vb_wide_mat) <- vb_wide$tissue_clean
+heatmap(vb_wide_mat)
+
+vb_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         sig = ifelse(slope_obs > 0 & qval < 0.05, 1, 0)) %>% 
+  ungroup() %>% 
+  group_by(tissue_clean) %>% 
+  filter(sum(sig) > 0) %>% 
+  ungroup() %>% 
+  select(Factor, sig, tissue_clean) %>% 
+  mutate(sig = as.factor(sig)) %>% 
+  ggplot(aes(x = Factor, y = tissue_clean, fill=sig)) +
+    geom_tile()+
+    scale_fill_viridis(discrete=TRUE) +
+  scale_x_discrete(expand=c(0,0))+
+  scale_y_discrete(expand=c(0,0))+
+  xlab("Latent factor") + ylab("Loading")+
+  ggtitle("FactorGo")
+
+ggsave2(paste0(plots_dir, "FactorGO.enrich.heatmap.png"),
+       width = full_width, height = onecol_height*5.5, units = 'cm', dpi = 300)
+```
+
+## Specificity of enrichment across factors
+
+```{r}
+enrich_by_factor <- vb_res %>% 
+  left_join(ref, by=c("Name" = "tissue")) %>% 
+  group_by(Factor) %>% 
+  mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+         sig = ifelse(slope_obs > 0 & qval < 0.05, 1, 0)) %>% 
+  ungroup() %>% 
+  filter(sig == 1)
+
+enrich_by_factor_list <- list()
+factor_has_enrich <- unique(enrich_by_factor$Factor); length(factor_has_enrich)
+
+for (idx in seq_along(factor_has_enrich)){
+  enrich_by_factor_list[idx] <- enrich_by_factor %>% 
+    filter(Factor == factor_has_enrich[[idx]]) %>% 
+    pull(tissue_clean) %>% 
+    list()
+}
+
+dist <- unlist(lapply(combn(enrich_by_factor_list, 2, simplify = FALSE), function(x) {
+  length(intersect(x[[1]], x[[2]]))/length(union(x[[1]], x[[2]])) }))
+
+dist_vb <- dist
+length(dist)
+summary(dist_svd)
+summary(dist_vb)
+
+wilcox.test(dist_vb, dist_svd, alternative = "two.sided")
+
+vb_res %>% filter(Factor == 86) %>% 
+  arrange(pval) %>% View
+```
+
+## Plot grid of phenotype, enrichment, variant (leading factor)
+
+```{r}
+## check factors out of band in enrichment of null annotation
+# FactorGO: 31, 35, 38, 39
+# tSVD: 22, 28, 34, 42
+method <- "FactorGo"
+trait <- "BMI"
+which_F <- 1
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  var_cntr <- var_cntr_svd
+  ldsc_res <- svd_res
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  var_cntr <- var_cntr_vb
+  ldsc_res <- vb_res
+}
+
+tibble(cntr_score = phe_cntr[, paste0("F", which_F)]*100, trait = phe) %>% 
+  # filter(grepl("fat|mass", trait, ignore.case = TRUE)) %>% 
+  slice_max(cntr_score, n = 20)
+
+tibble(cntr_score = var_cntr[, paste0("F", which_F)]*100, trait = map_genes$ID) %>% 
+      slice_max(cntr_score, n = 10)
+
+p1 <- plot_cntr(phe_cntr, which_F, method, phe, "phecntr", 20)
+p2 <- plot_cntr(var_cntr, which_F, method, map_genes$ID, "varcntr", 10)
+p3 <- plot_ldsc(ldsc_res, method, trait, which_F, cols_tissue_group, "SEG")
+
+ldsc_res %>% 
+    filter(Factor == which_F) %>% 
+    mutate(qval = qvalue(pval, fdr.level = 0.05, lambda=0)$qvalues,
+           neglogq = -log10(qval)) %>%
+    left_join(ref, by = c("Name"="tissue")) %>% 
+  distinct(tissue_clean)
+
+plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"), 
+  p3 + theme(legend.position="none"),
+  align = 'h',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  #label_size=10,
+  rel_heights = c(1, 1, 1), rel_widths=c(0.6,0.6,1)
+)
+
+# width=40, height=15
+ggsave2(paste0(plots_dir , method, "_", trait, "_var_ldsc_F", which_F, "_", which_annot, ".png"), width = full_width, height = full_height, units = 'cm', dpi = 300)
+```
+
+### grid: main fig
+
+```{r}
+method <- "FactorGo"
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  var_cntr <- var_cntr_svd
+  ldsc_res <- svd_res
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  var_cntr <- var_cntr_vb
+  ldsc_res <- vb_res
+}
+
+p1 <- plot_cntr(phe_cntr, 1, method, "BMI", phe, "phecntr", 20)
+p2 <- plot_cntr(var_cntr, 1, method, "BMI", map_genes$ID, "varcntr", 10)
+p3 <- plot_ldsc(ldsc_res, method, "BMI", 1, cols_tissue_group, "SEG")
+
+F1_grid <- plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"), 
+  p3 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(0.8,0.8,0.9)
+)
+
+
+p4 <- plot_cntr(phe_cntr, 2, method, "height", phe, "phecntr", 20)
+p5 <- plot_cntr(var_cntr, 2, method, "height", map_genes$ID, "varcntr", 10)
+p6 <- plot_ldsc(ldsc_res, method, "height", 2, cols_tissue_group, "SEG")
+
+F2_grid <- plot_grid(
+  p4 + theme(legend.position="none"), 
+  p5 + theme(legend.position="none"), 
+  p6 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,0.8,0.8)
+)
+
+p7 <- plot_cntr(phe_cntr, 86, method, "RA", phe, "phecntr", 20)
+p8 <- plot_cntr(var_cntr, 86, method, "RA", map_genes$ID, "varcntr", 10)
+p9 <- plot_ldsc(ldsc_res, method, "RA", 86, cols_tissue_group, "SEG")
+
+F3_grid <- plot_grid(
+  p7 + theme(legend.position="none"), 
+  p8 + theme(legend.position="none"), 
+  p9 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,0.75,0.7)
+)
+
+p10 <- plot_cntr(phe_cntr, 55, method, "PCa", phe, "phecntr", 20)
+p11 <- plot_cntr(var_cntr, 55, method, "PCa", map_genes$ID, "varcntr", 10)
+p12 <- plot_ldsc(ldsc_res, method, "PCa", 55, cols_tissue_group, "SEG")
+
+F4_grid <- plot_grid(
+  p10 + theme(legend.position="none"), 
+  p11 + theme(legend.position="none"), 
+  p12 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,0.75,0.7)
+)
+
+legend_b <- get_legend(
+  p12 + guides(color = guide_legend(nrow = 1),
+               fill=guide_legend(title = "Tissue")) +
+    theme(legend.title=element_text(size=5),
+          legend.direction = "horizontal",
+          legend.justification="center",
+          legend.key.size = unit(0.1, 'cm'))
+)
+
+plot_grid(
+  F1_grid,F2_grid,F3_grid,F4_grid,
+  legend_b,
+  align = 'vh',
+  nrow = 5,
+  ncol = 1,
+  label_size=6,
+  rel_heights = c(1,1,1,1,0.1), 
+  rel_widths=rep(1,5)
+)
+
+# width=40, height=15
+ggsave2(paste0(plots_dir , method, "_Fig5_trait_var_ldsc.png"), 
+       width = full_width, height = full_height*2.7, units = 'cm', dpi = 300)
+```
+
+### Plot grid of phenotype, enrichment, variant (leading 3 factors)
+
+```{r}
+method <- "tSVD" # FactorGo
+trait <- "PCa"
+F1 <- 53
+F2 <- 95
+F3 <- 27
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  var_cntr <- var_cntr_svd
+  ldsc_res <- svd_res
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  var_cntr <- var_cntr_vb
+  ldsc_res <- vb_res
+}
+
+p1 <- plot_cntr(phe_cntr, F1, method, trait, phe, "phecntr", 20)
+p2 <- plot_cntr(var_cntr, F1, method, trait, map_genes$ID, "varcntr", 10)
+p3 <- plot_ldsc(ldsc_res, method, trait, F1, cols_tissue_group, "SEG")
+
+F1_grid <- plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"), 
+  p3 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), 
+  # rel_widths = c(0.8,0.8,0.9)
+  # rel_widths = c(0.8,0.7,0.7)
+ rel_widths=c(1,0.75,0.6)
+)
+
+p4 <- plot_cntr(phe_cntr, F2, method, trait, phe, "phecntr", 20)
+p5 <- plot_cntr(var_cntr, F2, method, trait, map_genes$ID, "varcntr", 10)
+p6 <- plot_ldsc(ldsc_res, method, trait, F2, cols_tissue_group, "SEG")
+
+F2_grid <- plot_grid(
+  p4 + theme(legend.position="none"), 
+  p5 + theme(legend.position="none"), 
+  p6 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), 
+  # rel_widths=c(0.8,0.75,0.9)
+  # rel_widths=c(0.8,0.7,0.8)
+  rel_widths =c(1,0.8,0.6)
+  # rel_widths=c(1,0.8,0.8)
+)
+
+p7 <- plot_cntr(phe_cntr, F3, method, trait, phe, "phecntr", 20)
+p8 <- plot_cntr(var_cntr, F3, method, trait, map_genes$ID, "varcntr", 10)
+p9 <- plot_ldsc(ldsc_res, method, trait, F3, cols_tissue_group, "SEG")
+
+F3_grid <- plot_grid(
+  p7 + theme(legend.position="none"), 
+  p8 + theme(legend.position="none"), 
+  p9 + theme(legend.position="none"),
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), 
+  # rel_widths=c(1,0.75,0.65)
+  # rel_widths=c(0.8,0.75,0.9)
+  rel_widths=c(1,0.75,0.8)
+)
+
+legend_b <- get_legend(
+  p9 + guides(color = guide_legend(nrow = 1),
+               fill=guide_legend(title = "Tissue")) +
+    theme(legend.title=element_text(size=5),
+          legend.direction = "horizontal",
+          legend.justification="center",
+          legend.key.size = unit(0.1, 'cm'))
+)
+
+plot_grid(
+  F1_grid,F2_grid,F3_grid,
+  legend_b,
+  align = 'vh',
+  nrow = 4,
+  ncol = 1,
+  label_size=6,
+  rel_heights = c(1,1,1,0.1), 
+  rel_widths=rep(1,4)
+)
+
+# width=40, height=15
+ggsave2(paste0(plots_dir , method, "_", trait, "_grid.png"), 
+       width = full_width, height = full_height*2.2, units = 'cm', dpi = 300)
+```
+
+plot phenotype and variant
+```{r}
+method <- "FactorGo"
+trait <- "Top"
+which_F <- 1
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  var_cntr <- var_cntr_svd
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  var_cntr <- var_cntr_vb
+}
+
+p1 <- plot_cntr(phe_cntr, which_F, method, phe, "phecntr", 20)
+p2 <- plot_cntr(var_cntr, which_F, method, map_genes$ID, "varcntr", 10)
+
+plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none", legend.text = element_text(size=10)),
+  align = 'h',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 1,
+  #label_size=10,
+  rel_heights = c(1, 1), rel_widths=c(1,1)
+)
+
+# width=45, height=15
+ggsave2(paste0(plots_dir , method, "_", trait, "_var_F", which_F, ".png"), width = 40, height = 15, units = 'cm', dpi = 300)
+```
+
+    
+### Figure: Top 2 factors
+```{r}
+method <- "FactorGo"
+trait <- "Top"
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  ldsc_res <- svd_res
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  ldsc_res <- vb_res
+}
+
+p1 <- plot_cntr(phe_cntr, 1, method, phe, "phecntr", n_show = 20)
+p2 <- plot_cntr(phe_cntr, 2, method, phe, "phecntr", n_show = 20)
+
+p3 <- plot_ldsc(ldsc_res, "FactorGo", trait, 1, 1, cols_tissue_group)
+p4 <- plot_ldsc(ldsc_res, "FactorGo", trait, 2, 2, cols_tissue_group)
+
+plot_grid(
+  p1 + theme(legend.position="none"), 
+  p2 + theme(legend.position="none"),
+  p3 + theme(legend.position="none"),
+  p4 + theme(legend.position="none"),
+  align = 'vh',
+  #hjust = -1, # -1
+  nrow = 3,
+  rel_heights = c(1, 1, 0.8), rel_widths=c(1, 1,1)
+)
+
+# FactorGO: height (width=50, height=35)
+# FactorGO: RA (width=63, height=35)
+# FactorGO: PCa (width=33, height=35)
+# tSVD: height (width=67, height=35)
+# tSVD: PCa (width=50, height=35)
+# tSVD: RA (width=53, height=35)
+ggsave2(paste0(plots_dir , method, "_", trait, "_ldsc_", "_Top2_grid.png"), width = 35, height = 35, units = 'cm', dpi = 600)
+```
+
+### Figure: Trait top 1 factors
+
+```{r}
+method <- "FactorGo"
+trait <- "F1_height_RA_PCa"
+F1 <- 1
+F2 <- 2 # 2 ; 2
+F3 <- 86 # 59 ; 86
+F4 <- 55 # 53 ; 55
+
+
+if (method == "tSVD"){
+  phe_cntr <- phe_cntr_svd
+  ldsc_res <- svd_res
+}else if (method == "FactorGo"){
+  phe_cntr <- phe_cntr_vb
+  ldsc_res <- vb_res
+}
+
+p1 <- plot_cntr(phe_cntr, F1, method, phe, "phecntr", n_show = 20)
+p2 <- plot_cntr(phe_cntr, F2, method, phe, "phecntr", n_show = 20)
+p3 <- plot_cntr(phe_cntr, F3, method, phe, "phecntr", n_show = 20)
+p4 <- plot_cntr(phe_cntr, F4, method, phe, "phecntr", n_show = 20)
+
+p1_ldsc <- plot_ldsc(ldsc_res, method, "Top1", 1, F1, cols_tissue_group)
+p2_ldsc <- plot_ldsc(ldsc_res, method, "height", 1, F2, cols_tissue_group)
+p3_ldsc <- plot_ldsc(ldsc_res, method, "RA", 1, F3, cols_tissue_group)
+p4_ldsc <- plot_ldsc(ldsc_res, method, "PCa", 1, F4, cols_tissue_group)
+
+plot_grid(
+  p1 + theme(legend.position="none"), 
+  p1_ldsc + theme(legend.position="none"),
+  p2 + theme(legend.position="none"),
+  p2_ldsc + theme(legend.position="none"), 
+  p4 + theme(legend.position="none"),
+  p4_ldsc + theme(legend.position="none"),
+  p3 + theme(legend.position="none"),
+  p3_ldsc + theme(legend.position="none"),
+  align = 'h',
+  #hjust = -1, # -1
+  label_size = 12,
+  labels = c('A', '', 'B', '', 'C', '', 'D', ''),
+  nrow = 2, ncol=4,
+  rel_heights = c(1, 1, 1, 1, 1, 1, 1, 1), 
+  rel_widths=c(0.8, 0.8, 1, 0.8, 1, 0.2, 0.8, 0.2)
+)
+ggsave2(paste0(plots_dir , method, "_", trait, "_ldsc_wt_cosine_",which_annot, "_traits_top1_grid.png"), width = 95, height = 45, units = 'cm', dpi = 300)
+# plot_grid(
+#   p1 + theme(legend.position="none"), 
+#   p2 + theme(legend.position="none"),
+#   p3 + theme(legend.position="none"),
+#   p4 + theme(legend.position="none"), 
+#   p5 + theme(legend.position="none"),
+#   p6 + theme(legend.position="none"),
+#   align = 'vh',
+#   #hjust = -1, # -1
+#   nrow = 2,
+#   rel_heights = c(1, 1, 1), 
+#   rel_widths=c(1, 1,1)
+# )
+# FactorGO: height (width=50, height=35)
+# FactorGO: RA (width=63, height=35)
+# FactorGO: PCa (width=33, height=35)
+# tSVD: height (width=67, height=35)
+# tSVD: PCa (width=50, height=35)
+# tSVD: RA (width=53, height=35)
+ggsave2(paste0(plots_dir , method, "_", trait, "_ldsc_wt_cosine_",which_annot, "_traits_top1_grid.png"), width = 80, height = 30, units = 'cm', dpi = 300)
+```
+
+### Check calibration using random  gene sets
+
+```{r}
+library(qqplotr)
+# pLI10_1 is most constraints genes (less tolerant to LoF), more important;
+# pLI10_10 is least constraints (more tolerant to LoF), less important; 
+pLI_name <- "random" # pLI10
+
+# svd_res_pli <- read_tsv(paste0("./results/PanUKBB/sig_pval5e-08_nct2_maf1e-02_1kg/enrich/pLI10/svd.scalesnps.K100.pLI10_last3.pseudoNTRUE.4400blocks.cell_type_results.txt")) %>% 
+#   mutate(pLI_bin = gsub(".100kb", "", Name))
+# 
+# vb_res_pli <- read_tsv(paste0("./results/PanUKBB/sig_pval5e-08_nct2_maf1e-02_1kg/enrich/pLI10/vb.scaleTrue.K100.pLI10_last3.pseudoNTRUE.wt_cosine.4400blocks.cell_type_results.txt")) %>% 
+#   mutate(pLI_bin = gsub(".100kb", "", Name))
+
+svd_res_random <- read_tsv(paste0("./results/PanUKBB/sig_pval5e-08_nct2_maf1e-02_1kg/enrich/random_gene_annotations/svd.scalesnps.K100.randomgene.pseudoNTRUE.4400blocks.cell_type_results.txt")) %>% 
+  mutate(randomset = gsub(".100kb", "", Name))
+
+vb_res_random <- read_tsv(paste0("./results/PanUKBB/sig_pval5e-08_nct2_maf1e-02_1kg/enrich/random_gene_annotations/vb.scaleTrue.K100.randomgene.pseudoNTRUE.wt_cosine.4400blocks.cell_type_results.txt")) %>% 
+  mutate(randomset = gsub(".100kb", "", Name))
+
+p_vb <- vb_res_pli %>% 
+  mutate(neglogp = -log10(Coefficient_P_value)) %>% 
+  ggplot(aes(x = fac, y = neglogp, color = Name))+
+  geom_point()+
+  geom_hline(yintercept=-log10(0.05), color = "red", linetype = "dashed")+
+  geom_hline(yintercept=-log10(0.05/100), color = "blue", linetype = "dashed")+
+  mytheme+
+  ggtitle(paste("FactorGo enrichment of", pLI_name))+
+  xlab("Factor")+ylab("neglogp for enrichment")+
+  ylim(c(-0.1, 6.2))
+
+p_svd <- svd_res_pli %>% 
+  mutate(neglogp = -log10(Coefficient_P_value)) %>% 
+  ggplot(aes(x = fac, y = neglogp))+
+  geom_point()+
+  geom_hline(yintercept=-log10(0.05), color = "red", linetype = "dashed")+
+  geom_hline(yintercept=-log10(0.05/100), color = "blue", linetype = "dashed")+
+  mytheme+
+  ggtitle(paste("tSVD enrichment of", pLI_name))+
+  xlab("Factor")+ylab("neglogp for enrichment")+
+  ylim(c(-0.1, 6.2))
+
+plot_grid(
+  p_vb+theme(legend.position="none"), 
+  p_svd+theme(legend.position="right"),
+  align = 'vh',
+  labels = "AUTO",
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1)
+)
+
+ggsave2(paste0(plots_dir , "Calibrate_",pLI_name, "_grid.png"), width = 20, height = 12, units = 'cm', dpi = 300)
+
+## qq plot: with normal confidence band
+
+library(qvalue)
+# 45
+vb_res_random %>% 
+  group_by(fac) %>% 
+  mutate(qval = qvalue(Coefficient_P_value, fdr.level=0.05, lambda=0)$qvalues) %>% 
+  ungroup() %>% 
+  filter(qval < 0.05)
+# 42
+svd_res_random %>% 
+  group_by(fac) %>% 
+  mutate(qval = qvalue(Coefficient_P_value, fdr.level=0.05, lambda=0)$qvalues) %>% 
+  ungroup() %>% 
+  filter(qval < 0.05)
+
+# pooling together
+# qvalue not appropriete for U-shape pval value
+# set lambda = 0 is equivalent as BH adjustment, p.adjust(pval, method = "BH")
+FactorGO_qval <- qvalue(vb_res_random$Coefficient_P_value, fdr.level=0.05, lambda=0)
+tSVD_qval <- qvalue(svd_res_random$Coefficient_P_value, fdr.level=0.05,lambda=0)
+FactorGO_qval$pi0;tSVD_qval$pi0
+FactorGO_qval$lambda
+plot(FactorGO_qval)
+hist(FactorGO_qval)
+hist(p.adjust(vb_res_random$Coefficient_P_value, method = "BH"))
+mean(p.adjust(vb_res_random$Coefficient_P_value, method = "BH") < 0.05)
+
+res <- robust.fdr(vb_res_random$Coefficient_P_value,
+                  sides=1,
+                  p2=1-vb_res_random$Coefficient_P_value,
+                  discrete=F,use8=T)
+res$pi * 1000 * 0.05/sum(res$q < 0.05)
+res$fp[res$q < 0.05]
+max(FactorGO_qval$qvalues[FactorGO_qval$pvalues <= 0.05])
+sum(FactorGO_qval$pvalues <= 0.05)*(1-0.3861013)
+  
+summary(FactorGO_qval)
+summary(tSVD_qval)
+
+mean(FactorGO_qval$qvalues < 0.05)
+mean(tSVD_qval$qvalues < 0.05)
+
+length(qval$qvalues[qval$qvalues < 0.05])
+
+p_vb <- vb_res_random %>% 
+  ggplot(aes(sample = -log(Coefficient_P_value)))+
+  stat_qq_band(distribution = "exp", fill = "grey87", alpha=0.5) +
+  stat_qq_point(distribution = "exp", size=0.6)+
+  stat_qq_line(distribution = "exp")+ggtitle("FactorGo")+
+  # scale_colour_viridis_d()+
+  # facet_wrap(~randomset)+
+  # scale_colour_viridis_d(breaks=c('pLI10_8', 'pLI10_9', 'pLI10_10'))+
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  mytheme
+
+p_svd <- svd_res_random %>% 
+  ggplot(aes(sample = -log(Coefficient_P_value)))+
+  stat_qq_band(distribution = "exp", fill = "grey87", alpha=0.5) +
+  stat_qq_point(distribution = "exp", size=0.6)+
+  stat_qq_line(distribution = "exp")+ggtitle("tSVD")+
+  # scale_colour_viridis_d()+
+  # facet_wrap(~randomset)+
+  # scale_colour_viridis_d(breaks=c('pLI10_8', 'pLI10_9', 'pLI10_10'))+
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  mytheme
+
+legend_b <- get_legend(
+  p_vb + guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+prow <- plot_grid(
+  p_vb+theme(legend.position="none"), 
+  p_svd+theme(legend.position="none"),
+  align = 'vh',
+  nrow = 1,
+  rel_heights = c(1, 1), rel_widths=c(1, 1),
+  labels = "AUTO",
+  label_size = 8
+)
+
+plot_grid(prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+
+ggsave2(paste0(plots_dir , "Calibrate_",pLI_name, "_qqplot_grid.allfactor.png"), 
+       width = full_width, height = full_height, units = 'cm', dpi = 300)
+
+# FactorGO: 31, 35, 38, 39
+# tSVD: 22, 28, 34, 42
+svd_res_pli %>% 
+  filter(pLI_bin == "pLI10_10") %>% 
+  mutate(rank_p = rank(-log(Coefficient_P_value))) %>% 
+  # filter(rank_p %in% c(96:99)) %>% View
+  # filter(rank_p %in% c(99, 98, 93, 92)) %>% View
+  ggplot(aes(sample = -log(Coefficient_P_value), color = pLI_bin))+
+  stat_qq_band(distribution = "exp", fill = "grey87", alpha=0.5) +
+  stat_qq_point(distribution = "exp", size=0.6)+
+  stat_qq_line(distribution = "exp")+ggtitle("FactorGo")+
+  scale_colour_viridis_d(breaks=c('pLI10_8', 'pLI10_9', 'pLI10_10'))+
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  mytheme
+
+
+## 128 hits
+vb_res_random %>% filter(Coefficient_P_value < 0.05) %>% 
+  group_by(Name) %>% 
+  summarize(n = n())
+
+## 116 hits
+svd_res_random %>% filter(Coefficient_P_value < 0.05)
+```
+
+```{r}
+# https://www.stjude.org/research/departments/biostatistics.html
+# robust estimate: https://academic.oup.com/bioinformatics/article/22/16/1979/208386
+lts.rank.regr<-function(x,y)
+{
+	rx<-rank(x)
+	ry<-rank(y)
+	rfit<-ltsreg(rx,ry)
+	ryhat<-rfit$fitted.values
+	yhat<-approx(ry,y,xout=ryhat,rule=2)$y
+	return(list(x=x,y=y,yhat=yhat))
+}
+
+library(MASS)
+robust.fdr<-function(p,sides=1,p2=1-p,discrete=F,use8=T){
+	m<-length(p)
+	ord<-order(p)
+	pcumtab<-cumsum(table(p))/m
+	F05<-mean(p<=0.5)	
+	edf<-approx(as.numeric(names(pcumtab)),pcumtab,xout=p,rule=2)$y
+	if (sides==2)
+	{
+		pi<-min(1,2*mean(p))
+		loc.fdr<-pi*p/edf
+	}
+	else
+	{
+		p.new<-2*(p*(p<=p2)+p2*(p>p2))
+		pi<-min(1,2*mean(p.new))
+		if (discrete) 
+		{
+			if (use8) pi<-min(1,8*mean(p.new))
+			else
+			{
+				lam<-max(p[p<=0.5])
+				k<-1/(lam^2+(0.5-lam)^2)
+				pi<-min(k*mean(p.new),1)
+			
+			}
+		}
+		loc.fdr<-pi*p/edf
+		loc.fdr[p>0.5]<-(0.5*pi+edf[p>0.5]-F05)/edf[p>0.5]
+	}
+	up<-unique(p)
+	ufdr<-approx(p[ord],loc.fdr[ord],xout=up)$y
+	res<-lts.rank.regr(up,ufdr)
+	fdr<-approx(up,res$yhat,xout=p)$y
+	fdr[fdr>1]<-1
+	fp<-m*edf*fdr
+	fn<-m*(F05-edf-pi*(0.5-p))*(p<0.5)*(sides==1)+(sides==2)*m*(1-edf-pi*(1-p))
+	fn[fn<0]<-0
+	te<-fp+fn
+	q<-fdr
+	q[rev(ord)]<-cummin(fdr[rev(ord)])
+	
+	return(list(p=p,fdr=fdr,q=q,cdf=edf,loc.fdr=loc.fdr,fp=fp,fn=fn,te=te,pi=pi,ord=ord))
+}
+```
+
+# Robust analysis for top 2 and three leading traits
+
+## Robustness of FactorGo
+
+```{r}
+K <- 110
+datdir <- "sig_pval5e-08_nct2_maf1e-02_1kg" 
+dat <- "sig_pval5e-08_nct2_maf1e-02_1kg" 
+scaledat <- "True"
+if (K == 90){
+  # 128 (K=90), 192 (K=110), 64 (K=100) 
+ test_robust_idx <- "test128"
+}else if (K == 110){
+ test_robust_idx <- "test192"
+}
+
+VB_Zm <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".", test_robust_idx, ".Zm.tsv.gz"), col_names = F) %>% as.data.frame()
+# pxk
+VB_Wm  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".", test_robust_idx, ".Wm.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_info  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".", test_robust_idx, ".factor.tsv.gz"), col_names = F)
+names(VB_info) <- c("factor", "Ealpha", "R2")
+
+VB_EZ2  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".",test_robust_idx, ".EZ2.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_EW2  <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".",test_robust_idx,".EW2.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_Wvar <- read_tsv(paste0("./results/PanUKBB/", datdir,"/test_robust/VB.", dat, ".k", K, ".scale", scaledat,".",test_robust_idx,".Wvar.tsv.gz"), col_names = F) %>% as.data.frame()
+
+VB_Zm2 <- VB_Zm^2
+VB_Wm2 <- VB_Wm^2
+VB_Zm_se <- sqrt(VB_EZ2-VB_Zm2)
+VB_Zm_std <- VB_Zm / VB_Zm_se
+VB_std_Zm2 <- VB_Zm_std^2
+
+phe_cntr_vb <- as.data.frame(t(t(VB_std_Zm2)/colSums(VB_std_Zm2))); colSums(phe_cntr_vb)
+var_cntr_vb  <- as.data.frame(t(t(VB_Wm2)/colSums(VB_Wm2))); colSums(var_cntr_vb)
+cosine_phe_vb  <- VB_std_Zm2/rowSums(VB_std_Zm2); rowSums(cosine_phe_vb); dim(cosine_phe_vb)
+
+# set all colnames consistent
+colnames(phe_cntr_vb) <- paste0("F", 1:K)
+colnames(var_cntr_vb) <- paste0("F", 1:K)
+colnames(cosine_phe_vb) <- paste0("F", 1:K)
+```
+
+```{r}
+phe_cntr_vb_K90 <- phe_cntr_vb
+var_cntr_vb_K90 <- var_cntr_vb
+cosine_phe_vb_K90 <- cosine_phe_vb
+
+phe_cntr_vb_K100 <- phe_cntr_vb
+var_cntr_vb_K100 <- var_cntr_vb
+cosine_phe_vb_K100 <- cosine_phe_vb
+
+phe_cntr_vb_K110 <- phe_cntr_vb
+var_cntr_vb_K110 <- var_cntr_vb
+cosine_phe_vb_K110 <- cosine_phe_vb
+```
+
+## Plot K=100, 90, K110 for top 2 factors
+
+```{r}
+method <- "FactorGo"
+which_F_K90 <- 2
+which_F_K100 <- 2
+which_F_K110 <- 2
+
+p1_phe_K90 <- plot_cntr(phe_cntr_vb_K90, which_F_K90, method, "k=90",phe,"phecntr", 20)
+p1_phe_K100 <- plot_cntr(phe_cntr_vb_K100, which_F_K100, method, "k=100", phe, "phecntr", 20)
+p1_phe_K110 <- plot_cntr(phe_cntr_vb_K110, which_F_K110, method, "k=110", phe, "phecntr", 20)
+
+p2_var_K90 <- plot_cntr(var_cntr_vb_K90, which_F_K90, method,"k=90", map_genes$ID, "varcntr", 10)
+p2_var_K100 <- plot_cntr(var_cntr_vb_K100, which_F_K100, method,"k=100", map_genes$ID, "varcntr", 10)
+p2_var_K110 <- plot_cntr(var_cntr_vb_K110, which_F_K110, method,"k=110", map_genes$ID, "varcntr", 10)
+
+prow_2 <- plot_grid(
+  p1_phe_K90, p1_phe_K100, p1_phe_K110 ,
+  p2_var_K90, p2_var_K100, p2_var_K110,
+  align = 'h',
+  #labels = c("||B-WZ||", "||Z-RZ||", "||W-RW||"),
+  hjust = -1, # -1
+  nrow = 2,ncol=3,
+  label_size=6,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,1,1)
+)
+
+plot_grid(
+  prow_1, prow_2,
+  align = 'h',
+  labels = "AUTO",
+  # hjust = -1, # -1
+  nrow = 2, 
+  rel_widths=c(1,1)
+)
+
+ggsave2(paste0(plots_dir, "Robust_K90_100_110_Top2.png"),
+       width = full_width, height = full_height*2.5, units = 'cm', dpi = 300)
+```
+
+## Plot K=100, 90, K110 for leading 3 factors for focal traits
+
+```{r}
+trait <- "PCa"
+index <- 2
+traits_core <- c("Standing height", 
+                 "Cancer of prostate",
+                 "Body mass index (BMI)_v1",
+                 "Rheumatoid arthritis")
+    
+find_topF(cosine_phe_vb_K90, traits_core[index], "", "FactorGo", phe, 90, FALSE)
+find_topF(cosine_phe_vb_K100, traits_core[index], "", "FactorGo", phe, 100, FALSE)
+find_topF(cosine_phe_vb_K110, traits_core[index], "", "FactorGo", phe, 110, FALSE)
+
+which_F1_K90 <- 53; which_F1_K100 <- 55; which_F1_K110 <- 58
+which_F2_K90 <- 1; which_F2_K100 <- 1; which_F2_K110 <- 53
+which_F3_K90 <- 58; which_F3_K100 <- 58; which_F3_K110 <- 1
+
+p1_phe_K90 <- plot_cntr(phe_cntr_vb_K90, which_F1_K90, "FactorGo", trait, phe, "phecntr", 20)
+p1_phe_K100 <- plot_cntr(phe_cntr_vb_K100, which_F1_K100, "FactorGo", trait, phe, "phecntr", 20)
+p1_phe_K110 <- plot_cntr(phe_cntr_vb_K110, which_F1_K110, "FactorGo", trait, phe, "phecntr", 20)
+
+p2_phe_K90 <- plot_cntr(phe_cntr_vb_K90, which_F2_K90, "FactorGo", trait, phe, "phecntr", 20)
+p2_phe_K100 <- plot_cntr(phe_cntr_vb_K100, which_F2_K100, "FactorGo", trait, phe, "phecntr", 20)
+p2_phe_K110 <- plot_cntr(phe_cntr_vb_K110, which_F2_K110, "FactorGo", trait, phe, "phecntr", 20)
+
+p3_phe_K90 <- plot_cntr(phe_cntr_vb_K90, which_F3_K90, "FactorGo", trait, phe, "phecntr", 20)
+p3_phe_K100 <- plot_cntr(phe_cntr_vb_K100, which_F3_K100, "FactorGo",trait, phe, "phecntr", 20)
+p3_phe_K110 <- plot_cntr(phe_cntr_vb_K110, which_F3_K110, "FactorGo", trait, phe, "phecntr", 20)
+
+F1_grid <- plot_grid(
+  p1_phe_K90, 
+  p2_phe_K90, 
+  p3_phe_K90,
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,0.85,1)
+)
+
+F2_grid <- plot_grid(
+  p1_phe_K100, 
+  p2_phe_K100,
+  p3_phe_K100,
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,0.9,1)
+)
+
+F3_grid <- plot_grid(
+  p1_phe_K110, 
+  p2_phe_K110, 
+  p3_phe_K110,
+  align = 'h',
+  hjust = -1, # -1
+  nrow = 1,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,1,0.9)
+)
+
+plot_grid(
+  F1_grid,F2_grid,F3_grid,
+  align = 'h',
+  labels = c("(A) k=90", "(B) k=100", "(C) k=110"),
+  hjust = -1, # -1
+  nrow = 3,ncol=1,
+  label_size=6,
+  rel_heights = c(1, 1, 1), rel_widths=c(1,1,1)
+)
+
+ggsave2(paste0(plots_dir, "Robust_K90_100_110_", trait, ".png"),
+       width = full_width, height = full_height*2, units = 'cm', dpi = 300)
+```
+
+# Write supplmentary table
+
+```{r}
+trait_list <- c("Body mass index (BMI)_v1",
+                "Standing height", 
+                 "Rheumatoid arthritis",
+                 "Cancer of prostate")
+abbr_list <- c("BMI", "height", "RA", "PCa")
+
+for (trait_idx in seq_along(trait_list)){
+  for (method in c("FactorGo", "tSVD")){
+    if (method == "FactorGo"){
+      cosinedat <- cosine_phe_vb
+      phe_cntr <- phe_cntr_vb
+      var_cntr <- var_cntr_vb
+      ldscres <- vb_res
+    }else{
+      cosinedat <- cosine_phe_svd
+      phe_cntr <- phe_cntr_svd
+      var_cntr <- var_cntr_svd
+      ldscres <- svd_res
+    }
+    
+    topF <- as_tibble(cosinedat) %>% 
+      mutate(trait = manifest$clean_name) %>% 
+      filter(trait == trait_list[trait_idx]) %>%
+      gather(key="factor", value="cosine_score", paste0("F", 1:K)) %>% 
+      slice_max(cosine_score, n = 3) %>% 
+      arrange(desc(cosine_score)) %>% 
+      pull(factor)
+    
+    # 20 leading traits
+    init_file <- ifelse(file.exists(paste0(plots_dir, "Tables/", method, ".result.xlsx")), TRUE, FALSE)
+    
+    for (top in 1:3){
+      manifest %>% 
+        select(-c(zcol, filename, estimates.final.h2_z, clean_name)) %>% 
+        mutate(display_name = phe, cntr_score = phe_cntr[, topF[top]]) %>% 
+        slice_max(cntr_score, n = 20) %>% 
+        arrange(desc(cntr_score)) %>% 
+        xlsx::write.xlsx(file = paste0(plots_dir, "Tables/",
+                                       method, ".result.xlsx"),
+                         sheetName = paste0(abbr_list[trait_idx],"_", topF[top], "_trait"), 
+                         append = init_file,showNA=FALSE)
+      
+      map_genes %>% select(SNP, Gene_name, chr:rsid, hgnc_id, ensembl_gene_id) %>% 
+        mutate(cntr_score = var_cntr[, topF[top]]) %>% 
+        rename(clossest_gene = Gene_name) %>% 
+        slice_max(cntr_score, n = 10) %>% 
+        arrange(desc(cntr_score)) %>% 
+        xlsx::write.xlsx(file = paste0(plots_dir, "Tables/",
+                                       method, ".result.xlsx"),
+                         sheetName = paste0(abbr_list[trait_idx],"_", topF[top], "_SNP"), 
+                         append = TRUE,showNA=FALSE)
+      
+      outldsc <- ldscres %>% 
+        left_join(ref, by = c("Name"="tissue")) %>% 
+        select(-c(tissue_clean, tissue_clean_nodupid)) %>% 
+        rename(slope = slope_obs) %>% 
+        filter(Factor == as.integer(gsub("F", "", topF[top]))) 
+      if (sum(outldsc$qval < 0.05) < 1){
+        outldsc <- outldsc %>% slice_min(qval, n=10)
+      }else{
+        outldsc <- outldsc %>% filter(qval < 0.05)
+      }
+      outldsc %>% 
+        arrange(qval) %>% 
+        xlsx::write.xlsx(file = paste0(plots_dir, "Tables/",
+                                       method, ".result.xlsx"),
+                         sheetName = paste0(abbr_list[trait_idx],"_", topF[top], "_ldsc"), 
+                         append = TRUE,showNA=FALSE)
+    }
+  }
+}
+```
+
+
+# Plot for illutration diagram
+
+```{r}
+tibble(score = c(0.01, 0.05, 0.14, 0.2, 0.6),
+       Trait = paste("trait", 1:5)) %>% 
+  ggplot(aes(x = Trait, y = score)) +
+  geom_col(position = "dodge", aes(fill=score)) +
+  # scale_fill_gradient(low = "yellow", high = "red") +
+  scale_fill_viridis(option="C", direction=1, 
+                     begin = 0, end = 0.8)+ # C, D, 
+  theme_bw() +
+  ggtitle("contribution score") +
+  coord_flip()+
+  theme(legend.position="none",
+        axis.title.y = element_text(size=14, face="bold"),
+        axis.title.x = element_text(size=14, face="bold"),
+        axis.text.x = element_text(size=14, face="bold"),
+        axis.text.y = element_text(size=14,face="bold"),
+        panel.background = element_rect(
+      colour = "black",
+      size = 2
+    ),
+        title = element_text(size=14, face="bold"))+
+  ylab("")+xlab("")
+
+ggsave2(paste0(plots_dir, "trait_cntr_demo.png"),width = 10, height = 10, units = 'cm', dpi = 300)
+```
+
+
